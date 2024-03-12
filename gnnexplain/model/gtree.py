@@ -1,21 +1,17 @@
 import numpy as np
 from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
+from sklearn.naive_bayes import GaussianNB
 from sklearn.cluster import AgglomerativeClustering
 import torch
 from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.nn.aggr import Aggregation
-
+import optuna
 
 class Explainer:
     def __init__(self):
         self.feature_set = None
 
-
-    def fit(self, data, model, max_depth=7):
-        x = data.x.numpy()
-        adj = to_scipy_sparse_matrix(data.edge_index)
-        self.feature_set = FeatureSet(x)
-        
+    def fit(self, data, model):
         values = []
         hooks = []
         leaf_modules = leaf_modules_in_order(model, data)
@@ -26,19 +22,88 @@ class Explainer:
         model.eval()
         with torch.no_grad():
             out = model(data).detach().numpy()
-        for i, (value, hook, mod) in enumerate(zip(values, hooks, leaf_modules)):
+        for hook in hooks:
             hook.remove()
+        
+        def objective(trial):
+            params = {
+                f'max_depth_{i}' : trial.suggest_float(f'distance_threshold_{i}', 0, 1)
+                for i in range(len(leaf_modules) + 1)
+            }
+            self._fit(data, values, leaf_modules, **params)
+            return self.accuracy(data, split='val')
+        
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=100)
+
+        self._fit(data, values, leaf_modules, **study.best_params)
+
+    def _fit(self, data, values, modules, **params):
+        x = data.x.numpy()
+        neg_x = 1 - x
+        x_neigh = np.zeros((x.shape[0], 0))
+        adj = to_scipy_sparse_matrix(data.edge_index)
+        clusterings = [
+            AgglomerativeClustering(
+                n_clusters=None, distance_threshold=params[f'distance_threshold_{i}'], linkage='ward'
+            ).fit(values[i])
+            for i in range(len(modules))
+        ]
+        for i, (value, clustering, module) in enumerate(zip(values, clusterings, modules)):
+            if isinstance(module, Aggregation):
+                self.feature_set.deepen(to_scipy_sparse_matrix(data.edge_index))
+            self.feature_set.iterate(value, clustering, mask=data.train_mask, max_depth=params[f'distance_threshold_{i}'])
+
+
+    def fit_tree(self, data, model):
+        values = []
+        hooks = []
+        leaf_modules = leaf_modules_in_order(model, data)
+        for layer in leaf_modules:
+            hooks.append(layer.register_forward_hook(
+                lambda mod, inp, out: values.append(out.detach().numpy())
+            ))
+        model.eval()
+        with torch.no_grad():
+            out = model(data).detach().numpy()
+        for hook in hooks:
+            hook.remove()
+        
+        def objective(trial):
+            params = {
+                f'max_depth_{i}' : trial.suggest_int(f'max_depth_{i}', 1, 10)
+                for i in range(len(leaf_modules) + 1)
+            }
+            self._fit_tree(data, values, leaf_modules, **params)
+            return self.accuracy(data, split='val')
+        
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=100)
+
+        self._fit_tree(data, values, leaf_modules, **study.best_params)
+
+
+    def _fit_tree(self, data, values, modules, **params):
+        x = data.x.numpy()
+        adj = to_scipy_sparse_matrix(data.edge_index)
+        self.feature_set = FeatureSet(x)
+        for i, (value, mod) in enumerate(zip(values, modules)):
             if isinstance(mod, Aggregation):
                 self.feature_set.deepen(adj)
                 self.feature_set.iterate(
-                    value, mask=data.train_mask, max_depth=max_depth)
+                    value, mask=data.train_mask, max_depth=params[f'max_depth_{i}'])
             else:
                 self.feature_set.iterate(
-                    value, mask=data.train_mask, max_depth=max_depth)
-            self.dt = self.feature_set.iterate(
-                data.y.numpy(), mask=data.train_mask, update=False, max_depth=max_depth)
+                    value, mask=data.train_mask, max_depth=params[f'max_depth_{i}'])
+        self.dt = self.feature_set.iterate(
+            data.y.numpy(),
+            mask=data.train_mask,
+            update=False,
+            max_depth=params[f'max_depth_{len(modules)}']
+        )
 
-    def accuracy(self, data, split='val'):
+
+    def accuracy(self, data, split='test'):
         if split == 'train':
             mask = data.train_mask.numpy()
         elif split == 'val':
