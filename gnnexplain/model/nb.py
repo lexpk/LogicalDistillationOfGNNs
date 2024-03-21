@@ -6,6 +6,7 @@ from sklearn.base import BaseEstimator
 import torch
 from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.nn.aggr import Aggregation
+from torch_geometric.nn import global_mean_pool
 import optuna
 
 class OptimizingExplainer:
@@ -20,7 +21,7 @@ class OptimizingExplainer:
         def objective(trial):
             params = {
                 f'n_clusters_{i}' : trial.suggest_int(f'n_clusters_{i}', 2, self.n_cluster_max)
-                for i in range(n_leaves)
+                for i in range(n_leaves + 20)
             }
             expl = Explainer(**params).fit(data, model)
             return expl.accuracy(data, split='val')
@@ -51,7 +52,7 @@ class Explainer:
         self.agglomerate_concepts, self.agglomerate_explanation = \
             agglomerate_concepts(self.clusterings, **self.params)
         self.agglomerate_concepts = [np.array(concepts).T for concepts in self.agglomerate_concepts]
-        
+
         if agg[0]:
             raise ValueError('First layer cannot be aggregation layer')
         self.nb = [
@@ -61,9 +62,7 @@ class Explainer:
             )
         ]
         for i in range(1, len(self.clusterings)):
-            x = np.concatenate(
-                [data.x.numpy()] + self.agglomerate_concepts[:i], axis=-1
-            )
+            x = self.agglomerate_concepts[i-1]
             if agg[i]:
                 cat_mask = np.array([True] * x.shape[1] + [False] * x.shape[1] * 2)
                 int_mask = np.array([False] * x.shape[1] + [True] * x.shape[1] * 2)
@@ -72,18 +71,17 @@ class Explainer:
                 )
                 self.nb.append(
                     MixedNB(cat_mask, int_mask, min_categories=2).fit(
-                        x[train_mask], self.clusterings[i].labels_[train_mask]
+                        x, self.clusterings[i].labels_
                     )
                 )
             else:
+                if len(x) != len(self.clusterings[i].labels_):
+                    x = global_mean_pool(torch.tensor(x), data.batch).numpy()
                 self.nb.append(
                     CategoricalNB(min_categories=2).fit(
-                        x[train_mask], self.clusterings[i].labels_[train_mask]
+                        x, self.clusterings[i].labels_
                     )
                 )
-        x = np.concatenate(
-            [data.x.numpy()] + self.agglomerate_concepts, axis=-1
-        )
         self.nb.append(
             CategoricalNB(min_categories=2).fit(
                 x[train_mask], data.y.numpy()[train_mask]
@@ -94,21 +92,22 @@ class Explainer:
     def predict(self, data):
         adj = to_scipy_sparse_matrix(data.edge_index)
         x = data.x.numpy()
-        for i in range(len(self.nb) - 1):
+        for i in range(len(self.nb) - 2):
             x_temp = x
             if self.agg[i]:
                 x_temp = np.concatenate(
                     [x, adj @ x, adj @ (1 - x)], axis=-1
-                )
+                )        
             pred = self.nb[i].predict(x_temp)
-            x_new = np.array([
+            x = np.array([
                 [
                     prediction in explanation
                     for explanation in self.agglomerate_explanation[i]  
                 ]
                 for prediction in pred
             ])
-            x = np.concatenate([x, x_new], axis=-1)
+            if x.shape[0] != sum(self.nb[i+1].class_count_):
+                x = global_mean_pool(torch.tensor(x), data.batch).numpy()
         return self.nb[-1].predict(x)
 
     def accuracy(self, data, split='full'):

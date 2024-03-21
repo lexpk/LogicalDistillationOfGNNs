@@ -3,160 +3,145 @@ from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
 from sklearn.naive_bayes import GaussianNB
 from sklearn.cluster import AgglomerativeClustering
 import torch
+from torch.nn import ReLU
 from torch_geometric.utils import to_scipy_sparse_matrix
 from torch_geometric.nn.aggr import Aggregation
+from torch_geometric.nn import global_mean_pool
+from torch_geometric.data import Batch
 import optuna
 
+
+class OptimizingExplainer:
+    def __init__(self, max_depth=10, max_ccp_alpha=2e-2, lmbd=1e-4, n_trials=100, callbacks=[]):
+        self.max_depth = max_depth
+        self.max_ccp_alpha = max_ccp_alpha
+        self.lmbd = lmbd
+        self.n_trials = n_trials
+        self.callbacks = callbacks
+        self.explainer = None
+    
+    def fit(self, batch, model):
+        datalist = batch.to_data_list()
+        half = len(datalist) // 2
+        train = Batch.from_data_list(datalist[:half])
+        val = Batch.from_data_list(datalist[half:])
+        values, aggr = get_values(train, model)
+
+        def objective(trial):
+            params = {
+                f'max_depth_{i}' : trial.suggest_int(f'max_depth_{i}', 1, self.max_depth)
+                for i in range(len(values) + 1)
+            } | {
+                f'ccp_alpha_{i}' : trial.suggest_float(f'ccp_alpha_{i}', 0, self.max_ccp_alpha)
+                for i in range(len(values) + 1)
+            }
+            expl = Explainer(aggr, **params).fit(train, values)
+            return expl.accuracy(val) - self.lmbd * (sum(
+                dt.tree_.node_count for dt in expl.dt) + expl.out_dt.tree_.node_count)
+
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=self.n_trials, callbacks=self.callbacks, show_progress_bar=True)
+
+        values, aggr = get_values(batch, model)
+        self.explainer = Explainer(aggr, **study.best_params).fit(batch, values)
+        return self
+
+    def predict(self, batch):
+        return self.explainer.predict(batch)
+
+    def accuracy(self, batch):
+        return self.explainer.accuracy(batch)
+
+
 class Explainer:
-    def __init__(self):
-        self.feature_set = None
+    def __init__(self, aggr, **params):
+        self.aggr = aggr
+        self.params = params
+        self.dt = None
+        self.clustering = None
+        self.out_dt = None
 
-    def fit(self, data, model):
-        values = []
-        hooks = []
-        leaf_modules = leaf_modules_in_order(model, data)
-        for layer in leaf_modules:
-            hooks.append(layer.register_forward_hook(
-                lambda mod, inp, out: values.append(out.detach().numpy())
-            ))
-        model.eval()
-        with torch.no_grad():
-            out = model(data).detach().numpy()
-        for hook in hooks:
-            hook.remove()
-        
-        def objective(trial):
-            params = {
-                f'max_depth_{i}' : trial.suggest_float(f'distance_threshold_{i}', 0, 1)
-                for i in range(len(leaf_modules) + 1)
-            }
-            self._fit(data, values, leaf_modules, **params)
-            return self.accuracy(data, split='val')
-        
-        study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=100)
-
-        self._fit(data, values, leaf_modules, **study.best_params)
-
-    def _fit(self, data, values, modules, **params):
-        x = data.x.numpy()
-        neg_x = 1 - x
-        x_neigh = np.zeros((x.shape[0], 0))
-        adj = to_scipy_sparse_matrix(data.edge_index)
-        clusterings = [
-            AgglomerativeClustering(
-                n_clusters=None, distance_threshold=params[f'distance_threshold_{i}'], linkage='ward'
-            ).fit(values[i])
-            for i in range(len(modules))
-        ]
-        for i, (value, clustering, module) in enumerate(zip(values, clusterings, modules)):
-            if isinstance(module, Aggregation):
-                self.feature_set.deepen(to_scipy_sparse_matrix(data.edge_index))
-            self.feature_set.iterate(value, clustering, mask=data.train_mask, max_depth=params[f'distance_threshold_{i}'])
-
-
-    def fit_tree(self, data, model):
-        values = []
-        hooks = []
-        leaf_modules = leaf_modules_in_order(model, data)
-        for layer in leaf_modules:
-            hooks.append(layer.register_forward_hook(
-                lambda mod, inp, out: values.append(out.detach().numpy())
-            ))
-        model.eval()
-        with torch.no_grad():
-            out = model(data).detach().numpy()
-        for hook in hooks:
-            hook.remove()
-        
-        def objective(trial):
-            params = {
-                f'max_depth_{i}' : trial.suggest_int(f'max_depth_{i}', 1, 10)
-                for i in range(len(leaf_modules) + 1)
-            }
-            self._fit_tree(data, values, leaf_modules, **params)
-            return self.accuracy(data, split='val')
-        
-        study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=100)
-
-        self._fit_tree(data, values, leaf_modules, **study.best_params)
-
-
-    def _fit_tree(self, data, values, modules, **params):
-        x = data.x.numpy()
-        adj = to_scipy_sparse_matrix(data.edge_index)
-        self.feature_set = FeatureSet(x)
-        for i, (value, mod) in enumerate(zip(values, modules)):
-            if isinstance(mod, Aggregation):
-                self.feature_set.deepen(adj)
-                self.feature_set.iterate(
-                    value, mask=data.train_mask, max_depth=params[f'max_depth_{i}'])
+    def fit(self, batch, values):
+        adj = to_scipy_sparse_matrix(batch.edge_index)
+        feature_set = FeatureSet(batch.x.numpy())
+        self.dt = []
+        self.clustering = []
+        for i, (value, aggr) in enumerate(zip(values, self.aggr)):
+            if aggr:
+                feature_set.deepen(adj)
+                dt, clustering = feature_set.iterate(
+                    value, max_depth=self.params[f'max_depth_{i}'], ccp_alpha=self.params[f'ccp_alpha_{i}'])
             else:
-                self.feature_set.iterate(
-                    value, mask=data.train_mask, max_depth=params[f'max_depth_{i}'])
-        self.dt = self.feature_set.iterate(
-            data.y.numpy(),
-            mask=data.train_mask,
-            update=False,
-            max_depth=params[f'max_depth_{len(modules)}']
-        )
+                dt, clustering = feature_set.iterate(
+                    value, max_depth=self.params[f'max_depth_{i}'], ccp_alpha=self.params[f'ccp_alpha_{i}'])
+            self.dt.append(dt)
+            self.clustering.append(clustering)
+        feature_set.mean_pool(batch.batch)
+        self.out_dt = DecisionTreeClassifier(
+            max_depth=self.params[f'max_depth_{len(self.aggr)}'],
+            ccp_alpha=self.params[f'ccp_alpha_{len(self.aggr)}']
+        ).fit(feature_set.x, batch.y.numpy())
+        return self
 
+    def predict(self, batch):
+        adj = to_scipy_sparse_matrix(batch.edge_index)
+        feature_set = FeatureSet(batch.x.numpy())
+        for dt, clustering, aggr in zip(self.dt, self.clustering, self.aggr):
+            if aggr:
+                feature_set.deepen(adj)
+            feature_set.apply(dt, clustering)
+        feature_set.mean_pool(batch.batch)
+        result = self.out_dt.predict(feature_set.x)
+        return result
 
-    def accuracy(self, data, split='test'):
-        if split == 'train':
-            mask = data.train_mask.numpy()
-        elif split == 'val':
-            mask = data.val_mask.numpy()
-        elif split == 'test':
-            mask = data.test_mask.numpy()
-        elif split == 'full':
-            mask = np.ones(data.y.size(0), dtype=bool)
-        x = data.x.numpy()
-        y = data.y.numpy()
-        if isinstance(self.dt, DecisionTreeRegressor):    
-            (self.dt.predict(self.feature_set[mask]).argmax(-1) == y[mask]).mean()
-        if isinstance(self.dt, DecisionTreeClassifier):
-            return (self.dt.predict(self.feature_set[mask]) == y[mask]).mean()
-        raise ValueError("Model has not been trained yet.")
+    def accuracy(self, batch):
+        prediction = self.predict(batch)
+        y = batch.y.numpy()
+        return (prediction == y).mean()
+
 
 class FeatureSet:
     def __init__(self, x):
         self.x = x
-        self.x_neigh = np.zeros((x.shape[0], 0))
-        self.not_x_neigh = np.zeros((x.shape[0], 0))
 
-    def iterate(self, y, mask=None, update=True, max_depth=7):
-        if mask is None:
-            mask = np.ones(y.shape[0], dtype=bool)
-        x = np.concatenate([self.x, self.x_neigh, self.not_x_neigh], axis=1)
-        new_features, dt = _iterate(x, y, mask, max_depth=max_depth)
-        if update:
-            self.x = np.concatenate([self.x, new_features], axis=1)
-        return dt
+    def apply(self, dt, clustering):
+        leaves = _leaves(dt.tree_)
+        pred = dt.apply(self.x)
+        features = [pred == leaf for leaf in leaves]
+        features = agglomerate_features(clustering, features)
+        self.x = np.array(features).T
+        return self.x
+
+    def iterate(self, y, max_depth=7, ccp_alpha=0.0):
+        new_features, dt, clustering = _iterate(self.x, y, max_depth=max_depth, ccp_alpha=ccp_alpha)
+        self.x = new_features
+        return dt, clustering
 
     def deepen(self, adj):
-        self.x_neigh = adj @ self.x
-        self.not_x_neigh = adj @ (1 - self.x)
+        x_neigh = adj @ self.x
+        not_x_neigh = adj @ (1 - self.x)
+        self.x = np.concatenate([self.x, x_neigh, not_x_neigh], axis=1)
+
+    def mean_pool(self, batch):
+        self.x = global_mean_pool(torch.tensor(self.x), batch).numpy()
 
     def __getitem__(self, idx):
-        return np.concatenate([self.x, self.x_neigh, self.not_x_neigh], axis=1)[idx]
+        return self.x[idx]
 
 
-def _iterate(x, y, mask, max_depth=7):
-    if np.issubdtype(y.dtype, np.floating):
-        dt = DecisionTreeRegressor(max_depth=max_depth)
-    else:
-        dt = DecisionTreeClassifier(max_depth=max_depth)
-    dt.fit(x[mask], y[mask])
+def _iterate(x, y, max_depth=7, ccp_alpha=0.0):
+    dt = DecisionTreeRegressor(max_depth=max_depth, ccp_alpha=ccp_alpha)
+    dt.fit(x, y)
     leaves = _leaves(dt.tree_)
+    if len(leaves) == 1:
+        return np.ones((x.shape[0], 1)), dt, TrivialClustering()
     dt_out = dt.apply(x)
     new_features = [dt_out == leaf for leaf in leaves]
-    clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=.1, linkage='ward')
-    clustering.fit(dt.tree_.value[leaves].squeeze())
+    clustering = AgglomerativeClustering(n_clusters=2, linkage='ward')
+    clustering.fit(dt.tree_.value[leaves].squeeze(axis=2))
     new_features = agglomerate_features(clustering, new_features)
     
-    return np.array(new_features).T, dt
+    return np.array(new_features).T, dt, clustering
 
 
 def _leaves(tree, node_id=0):
@@ -169,24 +154,38 @@ def _leaves(tree, node_id=0):
 
 
 def agglomerate_features(clustering, features):
-    for i, children in enumerate(clustering.children_):
+    for children in clustering.children_:
         a, b = children
         features.append(np.logical_or(features[a], features[b]))
-    return features
+    return np.stack(features)
 
 
-def leaf_modules_in_order(model, input):
+def get_values(batch, model):
+    values = []
     hooks = []
-    modules_in_order = []
-    for module in model.modules():
-        if len(list(module.children())) == 0:
-            hooks.append(
-                module.register_forward_hook(
-                    lambda self, *_: modules_in_order.append(self)
-                )
-            )
+    modules = [module for module in model.modules() if isinstance(module, ReLU) or isinstance(module, Aggregation)]
+    for layer in modules:
+        hooks.append(layer.register_forward_hook(
+            lambda mod, inp, out: values.append(out.detach().numpy())
+        ))
     with torch.no_grad():
-        model(input)
+        model(batch).detach().numpy()
     for hook in hooks:
         hook.remove()
-    return modules_in_order
+    return values, [isinstance(module, Aggregation) for module in modules]
+
+
+class TrivialClustering:
+    def __init__(self):
+        self.n_clusters = 1
+        self.children_ = np.array([])
+
+    def fit(self, x):
+        return self
+
+    def fit_predict(self, x):
+        return np.zeros(x.shape[0])
+
+    def predict(self, x):
+        return np.zeros(x.shape[0])
+
