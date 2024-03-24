@@ -65,12 +65,12 @@ class Explainer:
         x, y = batch.x.numpy(), batch.y.numpy()
         for i, (value, aggr) in enumerate(zip(values, self.aggr)):
             self.layer.append(ExplainerLayer(self.params[f'max_depth_{i}'], self.params[f'ccp_alpha_{i}']))
-            x = self.layer[-1].fit_predict(x, value, adj if aggr else None)
+            x = self.layer[-1].fit_predict(x, value, adj if aggr else None).prune()
         self.out_layer = ExplainerPoolingLayer(
             self.params[f'max_depth_{len(values)}'],
             self.params[f'ccp_alpha_{len(values)}']
         )
-        y = self.out_layer.fit(x, batch.batch, y)
+        y = self.out_layer.fit(x, batch.batch, y).prune()
         return self
 
     def predict(self, batch):
@@ -94,7 +94,7 @@ class Explainer:
 
     def save_image(self, path):
         import matplotlib.pyplot as plt
-        fig, axs = plt.subplots(nrows=len(self.layer) + 1)
+        fig, axs = plt.subplots(nrows=len(self.layer) + 1, figsize=(10, 4 * len(self.layer) + 4))
         for i, ax in enumerate(axs):
             self.layer[i].plot(ax, i)
         self.out_layer.plot(axs[-1], len(self.layer))
@@ -125,12 +125,15 @@ class ExplainerLayer:
         leaves = _leaves(self.dt.tree_)
         leaf_values = [self.dt.tree_.value[i, :, 0] for i in leaves]
         if len(leaves) == 1:
-            combinations = [{1}]
+            combinations = [{0}]
         else:
             clustering = AgglomerativeClustering(n_clusters=2, linkage='ward')
             clustering.fit(leaf_values)
             combinations = _agglomerate_labels(len(leaves), clustering)
-        self.leaf_indices = np.array([leaves.index(i) if i in leaves else -1 for i in range(self.dt.tree_.node_count)])
+        self.leaf_indices = np.array([
+            leaves.index(i) if i in leaves else -1
+            for i in range(self.dt.tree_.node_count)
+        ])
         self.leaf_values = np.array([
             [i in combination for combination in combinations]
             for i in self.leaf_indices if i != -1
@@ -143,9 +146,9 @@ class ExplainerLayer:
 
     def predict(self, x, adj=None):
         if self.aggregation:
-            x = np.concatenate([
-                x, adj @ x, adj @ (1 - x), (adj @ x) / (adj @ np.ones((x.shape[0], 1))).clip(1e-6, None)
-            ], axis=1)
+            x = np.asarray(np.concatenate([
+                x, adj @ x, adj @ (1 - x), (adj @ x) / (adj.sum(axis=1)).clip(1e-6, None)
+            ], axis=1))
         pred = self.dt.apply(x)
         return self.leaf_values[self.leaf_indices[pred]]
 
@@ -154,7 +157,7 @@ class ExplainerLayer:
         return self.predict(x, adj)
 
     def _relevant(self):
-        return {feature % self.n_features_in for feature in self.dt.tree_.n_features if feature != -2}
+        return {feature % self.n_features_in for feature in self.dt.tree_.feature if feature != -2}
 
     def _prune_irrelevant(self, relevant):
         self.leaf_formulas = [
@@ -165,9 +168,10 @@ class ExplainerLayer:
     def _remove_redunant(self):
         flag = True
         while flag:
+            flag = False
             for parent, (left, right) in enumerate(zip(self.dt.tree_.children_left, self.dt.tree_.children_right)):
-                if self.dt.tree_.children_left[parent] == -1 and self.dt.tree_.children_right[parent] == -1 and \
-                    self.leaf_formulas[left] == self.leaf_formulas[right]:
+                if self.leaf_indices[left] != -1 and self.leaf_indices[right] != -1 and left != -1 and right != -1 and \
+                        self.leaf_formulas[self.leaf_indices[left]] == self.leaf_formulas[self.leaf_indices[right]]:
                     self._merge_leaves(parent, left, right)
                     flag = True
                     break
@@ -175,22 +179,21 @@ class ExplainerLayer:
     def _merge_leaves(self, parent, left, right):
         self.dt.tree_.children_left[parent] = -1
         self.dt.tree_.children_right[parent] = -1
-        self.leave_indices[parent] = self.leave_indices[left]
-        self.leave_indices[left] = -1
-        self.leave_indices[right] = -1
-        self.feature[parent] = -2
-        self.threshold[parent] = -2
+        self.leaf_indices[parent] = self.leaf_indices[left]
+        self.leaf_indices[left] = -1
+        self.leaf_indices[right] = -1
+        self.dt.tree_.feature[parent] = -2
+        self.dt.tree_.threshold[parent] = -2
 
     def plot(self, ax, n=0):
         from sklearn.tree import plot_tree
         plot_tree(self.dt, ax=ax)
         leaf_counter = 0
-        for obj in ax.properties():
+        for obj in ax.properties()['children']:
             if type(obj) == matplotlib.text.Annotation:
                 obj.set_fontsize(8)
                 txt = obj.get_text().splitlines()[0]
-                #parse 'X[3] <= 13'
-                match = re.match(r'X\[(\d+)\] <= (\d+)', txt)
+                match = re.match(r'x\[(\d+)\] <= (\d+\.\d+)', txt)
                 if match:
                     feature, threshold = match.groups()
                     feature = int(feature)
@@ -198,15 +201,16 @@ class ExplainerLayer:
                     if feature < self.n_features_in:
                         obj.set_text(fr'$\phi_{{{feature}}}^{{{n}}}x$')
                     elif feature < 2 * self.n_features_in:
-                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y\phi_{{{feature - self.n_features_in}}}^{{{n}}}x$')
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y(Exy\wedge\phi_{{{feature - self.n_features_in}}}^{{{n}}}y)$')
                     elif feature < 3 * self.n_features_in:
-                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y\neg\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}x$')
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y(Exy\wedge\neg\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}y)$')
                     else:
-                        obj.set_text(fr'$\exists^{{>{threshold}}}y\phi_{{{feature - 3 * self.n_features_in}}}^{{{n}}}x$')
+                        obj.set_text(fr'$\exists^{{>{threshold}}}y(Exy\wedge\phi_{{{feature - 3 * self.n_features_in}}}^{{{n}}}y)$')
                 else:
-                    obj.set_text(r", ".join([
+                    txt = r"$" + r", ".join([
                         fr"\phi_{{{i}}}^{{{n}}}x" for i in self.leaf_formulas[[i for i in self.leaf_indices if i != -1][leaf_counter]]
-                    ]))
+                    ]) + r"\:$"
+                    obj.set_text(txt)
                     leaf_counter += 1
 
 
@@ -222,18 +226,12 @@ class ExplainerPoolingLayer:
     
     def fit(self, x, batch, y):
         self.n_features_in = x.shape[1]
-        x = np.concatenate([
-            global_mean_pool(torch.tensor(x), batch).numpy(),
-            global_add_pool(torch.tensor(x), batch).numpy()
-        ], axis=1)
+        x = _pool(x, batch)
         self.dt = DecisionTreeClassifier(max_depth=self.max_depth, ccp_alpha=self.max_ccp_alpha)
         self.dt.fit(x, y)
 
     def predict(self, x, batch):
-        x = np.concatenate([
-            global_mean_pool(torch.tensor(x), batch).numpy(),
-            global_add_pool(torch.tensor(x), batch).numpy()
-        ], axis=1)
+        x = _pool(x, batch)
         return self.dt.predict(x)
 
     def fit_predict(self, x, batch, y):
@@ -241,9 +239,38 @@ class ExplainerPoolingLayer:
         return self.predict(x, batch)
 
     def _relevant(self):
-        return [feature for feature in self.dt.tree_.n_features if feature != -2]
+        return {feature % self.n_features_in for feature in self.dt.tree_.feature if feature != -2}
 
-        
+    def plot(self, ax, n=0):
+        from sklearn.tree import plot_tree
+        plot_tree(self.dt, ax=ax)
+        for obj in ax.properties()['children']:
+            if type(obj) == matplotlib.text.Annotation:
+                obj.set_fontsize(8)
+                txt = obj.get_text().splitlines()[0]
+                #match x[3] <= 13.1312
+                match = re.match(r'x\[(\d+)\] <= (\d+\.\d+)', txt)
+                if match:
+                    feature, threshold = match.groups()
+                    feature = int(feature)
+                    threshold = float(threshold)
+                    if feature < self.n_features_in:
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y\phi_{{{feature}}}^{{{n}}}y$')
+                    elif feature < 2 * self.n_features_in:
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}\neg\phi_{{{feature - self.n_features_in}}}^{{{n}}}y$')
+                    else:
+                        obj.set_text(fr'$\exists^{{>{threshold}}}y\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}y$')
+
+
+def _pool(x, batch):
+    return np.concatenate([
+        global_mean_pool(torch.tensor(x), batch).numpy(),
+        global_mean_pool(~torch.tensor(x), batch).numpy(),
+        global_add_pool(torch.tensor(x), batch).numpy()
+    ], axis=1)
+
+
+
 def _agglomerate_labels(n_labels, clustering):
     agglomerated_features = [{i} for i in range(n_labels)]
     for i, j in clustering.children_:
