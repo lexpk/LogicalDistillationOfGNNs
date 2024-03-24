@@ -10,16 +10,15 @@ from torch_geometric.data import Batch
 import optuna
 
 
-class OptimizingExplainer:
-    def __init__(self, max_depth=10, max_ccp_alpha=2e-2, lmbd=1e-4, n_trials=100, callbacks=[]):
+class Optimizer:
+    def __init__(self, max_depth=10, max_ccp_alpha=2e-2, lmbd=1e-4, n_trials=100):
         self.max_depth = max_depth
         self.max_ccp_alpha = max_ccp_alpha
         self.lmbd = lmbd
         self.n_trials = n_trials
-        self.callbacks = callbacks
         self.explainer = None
     
-    def fit(self, batch, model):
+    def optimize(self, batch, model):
         datalist = batch.to_data_list()
         half = len(datalist) // 2
         train = Batch.from_data_list(datalist[:half])
@@ -36,14 +35,14 @@ class OptimizingExplainer:
             }
             expl = Explainer(aggr, **params).fit(train, values)
             return expl.accuracy(val) - self.lmbd * (sum(
-                dt.tree_.node_count for dt in expl.dt) + expl.out_dt.tree_.node_count)
+                layer.dt.tree_.node_count for layer in expl.layer) + expl.out_layer.dt.tree_.node_count)
 
         study = optuna.create_study(direction='maximize')
         study.optimize(objective, n_trials=self.n_trials, callbacks=self.callbacks, show_progress_bar=True)
 
         values, aggr = get_values(batch, model)
         self.explainer = Explainer(aggr, **study.best_params).fit(batch, values)
-        return self
+        return self.explainer
 
     def predict(self, batch):
         return self.explainer.predict(batch)
