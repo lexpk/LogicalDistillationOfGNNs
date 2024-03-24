@@ -36,8 +36,8 @@ for name in dataset_names:
     logger = WandbLogger(project="gnnexplain", group=name)
 
     trainer = Trainer(
-        max_epochs=100,
-        log_every_n_steps=1,
+        max_steps=1e4,
+        log_every_n_steps=5,
         logger=logger,
         callbacks=[ModelCheckpoint(
             dirpath="checkpoints",

@@ -23,7 +23,7 @@ class NodeGCN(LightningModule):
         return F.log_softmax(x, dim=1)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=0.01)
+        return torch.optim.Adam(self.parameters(), lr=1e-4)
 
     def training_step(self, batch, batch_idx):
         out = self(batch)[batch.train_mask]
@@ -63,7 +63,7 @@ class GraphGCN(LightningModule):
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
-        x = self.conv1(x, edge_index)
+        x = self.act(self.conv1(x, edge_index))
         for conv, norm in zip(self.conv_layers, self.norms):
             x = self.act(conv(norm(x), edge_index))
         x = global_mean_pool(x, batch)
@@ -71,7 +71,7 @@ class GraphGCN(LightningModule):
         return F.log_softmax(x, dim=1)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters())
+        return torch.optim.Adam(self.parameters(lr=1e-4))
 
     def training_step(self, batch, batch_idx):
         out = self(batch)

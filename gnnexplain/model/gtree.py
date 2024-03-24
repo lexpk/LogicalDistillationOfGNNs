@@ -100,6 +100,61 @@ class Explainer:
         return (prediction == y).mean()
 
 
+class ExplainerLayer:
+    def __init__(self, max_depth, max_ccp_alpha):
+        self.max_depth = max_depth
+        self.max_ccp_alpha = max_ccp_alpha
+        self.dt = None
+        self.n_features_in = None
+        self.leaf_indices = None
+        self.combinations = None
+        self.leaf_values = None
+        self.aggregation = False
+
+    def fit(self, x, y, adj=None):
+        self.n_features_in = x.shape[1]
+        if adj is not None:
+            self.aggregation = True
+            x = np.concatenate([
+                x, adj @ x, adj @ (1 - x), (adj @ x) / (adj.sum(axis=1)).clip(1e-6, None),
+            ], axis=1)
+        self.dt = DecisionTreeRegressor(max_depth=self.max_depth, ccp_alpha=self.max_ccp_alpha)
+        self.dt.fit(x, y)
+        leaves = _leaves(self.dt.tree_)
+        if len(self.leaf_indices) == 1:
+            self.combinations = [{1}]
+        else:
+            self.aggregation = True
+            clustering = AgglomerativeClustering(n_clusters=2, linkage='ward')
+            clustering.fit(self.leaf_values)
+            self.combinations = _agglomerate_labels(len(leaves), clustering)
+        self.leaf_indices = [leaves.index(i) if i in leaves else -1 for i in range(self.dt.tree_.node_count)]
+        self.leaf_values = np.array(
+            [i in combination for combination in self.combinations]
+            for i in self.leaf_indices if i != -1
+        )
+        return self
+
+    def predict(self, x, adj=None):
+        if self.aggregation:
+            x = np.concatenate([
+                x, adj @ x, adj @ (1 - x), (adj @ x) / (adj.sum(axis=1)).clip(1e-6, None),
+            ], axis=1)
+        pred = self.dt.apply(x)
+        return self.leaf_values[self.leaf_indices[pred]]
+
+    def fit_predict(self, x, y, adj=None):
+        self.fit(x, y, adj)
+        return self.predict(x, adj)
+
+        
+def _agglomerate_labels(n_labels, clustering):
+    agglomerated_features = [{i} for i in range(n_labels)]
+    for i, j in clustering.children_:
+        agglomerated_features.append(agglomerated_features[i] | agglomerated_features[j])
+    return agglomerated_features
+
+
 class FeatureSet:
     def __init__(self, x):
         self.x = x
@@ -145,19 +200,13 @@ def _iterate(x, y, max_depth=7, ccp_alpha=0.0):
 
 
 def _leaves(tree, node_id=0):
-    if tree.children_left[node_id] == tree.children_right[node_id]:
+    if tree.children_left[node_id] == tree.children_right[node_id] and \
+        (node_id in tree.children_left or node_id in tree.children_right or node_id == 0)
         return [node_id]
     else:
         left = _leaves(tree, tree.children_left[node_id])
         right = _leaves(tree, tree.children_right[node_id])
         return left + right
-
-
-def agglomerate_features(clustering, features):
-    for children in clustering.children_:
-        a, b = children
-        features.append(np.logical_or(features[a], features[b]))
-    return np.stack(features)
 
 
 def get_values(batch, model):
