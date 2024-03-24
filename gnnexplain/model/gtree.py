@@ -35,7 +35,7 @@ class Optimizer:
                 f'ccp_alpha_{i}' : trial.suggest_float(f'ccp_alpha_{i}', 0, self.max_ccp_alpha)
                 for i in range(len(values) + 1)
             }
-            expl = Explainer(aggr, **params).fit(train, values)
+            expl = Explainer(aggr, **params).fit(train, values).prune()
             return expl.accuracy(val) - self.lmb * (sum(
                 layer.dt.tree_.node_count for layer in expl.layer) + expl.out_layer.dt.tree_.node_count)
 
@@ -43,7 +43,7 @@ class Optimizer:
         study.optimize(objective, n_trials=self.n_trials, show_progress_bar=True)
 
         values, aggr = _get_values(batch, model)
-        self.explainer = Explainer(aggr, **study.best_params).fit(batch, values)
+        self.explainer = Explainer(aggr, **study.best_params).fit(batch, values).prune()
         return self.explainer
 
     def predict(self, batch):
@@ -65,12 +65,12 @@ class Explainer:
         x, y = batch.x.numpy(), batch.y.numpy()
         for i, (value, aggr) in enumerate(zip(values, self.aggr)):
             self.layer.append(ExplainerLayer(self.params[f'max_depth_{i}'], self.params[f'ccp_alpha_{i}']))
-            x = self.layer[-1].fit_predict(x, value, adj if aggr else None).prune()
+            x = self.layer[-1].fit_predict(x, value, adj if aggr else None)
         self.out_layer = ExplainerPoolingLayer(
             self.params[f'max_depth_{len(values)}'],
             self.params[f'ccp_alpha_{len(values)}']
         )
-        y = self.out_layer.fit(x, batch.batch, y).prune()
+        y = self.out_layer.fit(x, batch.batch, y)
         return self
 
     def predict(self, batch):
@@ -95,8 +95,8 @@ class Explainer:
     def save_image(self, path):
         import matplotlib.pyplot as plt
         fig, axs = plt.subplots(nrows=len(self.layer) + 1, figsize=(10, 4 * len(self.layer) + 4))
-        for i, ax in enumerate(axs):
-            self.layer[i].plot(ax, i)
+        for i, layer in enumerate(self.layer):
+            layer.plot(axs[i], i)
         self.out_layer.plot(axs[-1], len(self.layer))
         fig.savefig(path)
         plt.close(fig)
