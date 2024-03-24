@@ -11,10 +11,10 @@ import optuna
 
 
 class Optimizer:
-    def __init__(self, max_depth=10, max_ccp_alpha=2e-2, lmbd=1e-4, n_trials=100):
+    def __init__(self, max_depth=10, max_ccp_alpha=2e-2, lmb=1e-4, n_trials=100):
         self.max_depth = max_depth
         self.max_ccp_alpha = max_ccp_alpha
-        self.lmbd = lmbd
+        self.lmb = lmb
         self.n_trials = n_trials
         self.explainer = None
     
@@ -23,7 +23,7 @@ class Optimizer:
         half = len(datalist) // 2
         train = Batch.from_data_list(datalist[:half])
         val = Batch.from_data_list(datalist[half:])
-        values, aggr = get_values(train, model)
+        values, aggr = _get_values(train, model)
 
         def objective(trial):
             params = {
@@ -34,13 +34,13 @@ class Optimizer:
                 for i in range(len(values) + 1)
             }
             expl = Explainer(aggr, **params).fit(train, values)
-            return expl.accuracy(val) - self.lmbd * (sum(
+            return expl.accuracy(val) - self.lmb * (sum(
                 layer.dt.tree_.node_count for layer in expl.layer) + expl.out_layer.dt.tree_.node_count)
 
         study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=self.n_trials, callbacks=self.callbacks, show_progress_bar=True)
+        study.optimize(objective, n_trials=self.n_trials, show_progress_bar=True)
 
-        values, aggr = get_values(batch, model)
+        values, aggr = _get_values(batch, model)
         self.explainer = Explainer(aggr, **study.best_params).fit(batch, values)
         return self.explainer
 
@@ -55,7 +55,7 @@ class Explainer:
     def __init__(self, aggr, **params):
         self.aggr = aggr
         self.params = params
-        self.layer = None
+        self.layer = []
         self.out_layer = None
 
     def fit(self, batch, values):
@@ -82,6 +82,9 @@ class Explainer:
         prediction = self.predict(batch)
         return (prediction == batch.y.numpy()).mean()
 
+    def prune(self):
+        relevant = self.out_layer._relevant()
+
 
 class ExplainerLayer:
     def __init__(self, max_depth, max_ccp_alpha):
@@ -90,38 +93,43 @@ class ExplainerLayer:
         self.dt = None
         self.n_features_in = None
         self.leaf_indices = None
-        self.combinations = None
         self.leaf_values = None
+        self.leaf_formulas = None
         self.aggregation = False
 
     def fit(self, x, y, adj=None):
         self.n_features_in = x.shape[1]
         if adj is not None:
             self.aggregation = True
-            x = np.concatenate([
+            x = np.asarray(np.concatenate([
                 x, adj @ x, adj @ (1 - x), (adj @ x) / (adj.sum(axis=1)).clip(1e-6, None),
-            ], axis=1)
+            ], axis=1))
         self.dt = DecisionTreeRegressor(max_depth=self.max_depth, ccp_alpha=self.max_ccp_alpha)
         self.dt.fit(x, y)
         leaves = _leaves(self.dt.tree_)
-        if len(self.leaf_indices) == 1:
-            self.combinations = [{1}]
+        leaf_values = [self.dt.tree_.value[i][0][0] for i in leaves]
+        if len(leaves) == 1:
+            combinations = [{1}]
         else:
             self.aggregation = True
             clustering = AgglomerativeClustering(n_clusters=2, linkage='ward')
-            clustering.fit(self.leaf_values)
-            self.combinations = _agglomerate_labels(len(leaves), clustering)
-        self.leaf_indices = [leaves.index(i) if i in leaves else -1 for i in range(self.dt.tree_.node_count)]
+            clustering.fit(leaf_values)
+            combinations = _agglomerate_labels(len(leaves), clustering)
+        self.leaf_indices = np.array([leaves.index(i) if i in leaves else -1 for i in range(self.dt.tree_.node_count)])
         self.leaf_values = np.array(
-            [i in combination for combination in self.combinations]
+            [i in combination for combination in combinations]
             for i in self.leaf_indices if i != -1
         )
+        self.leaf_formulas = [
+            [i for (i, b) in enumerate(self.leaf_values[j]) if b]
+            for j in range(len(self.leaf_values))
+        ]
         return self
 
     def predict(self, x, adj=None):
         if self.aggregation:
             x = np.concatenate([
-                x, adj @ x, adj @ (1 - x), (adj @ x) / (adj.sum(axis=1)).clip(1e-6, None),
+                x, adj @ x, adj @ (1 - x), (adj @ x) / (adj @ np.ones(x.shape[0])).clip(1e-6, None)
             ], axis=1)
         pred = self.dt.apply(x)
         return self.leaf_values[self.leaf_indices[pred]]
@@ -129,6 +137,34 @@ class ExplainerLayer:
     def fit_predict(self, x, y, adj=None):
         self.fit(x, y, adj)
         return self.predict(x, adj)
+
+    def _relevant(self):
+        return [feature for feature in self.dt.tree_.n_features if feature != -2]
+
+    def _prune_irrelevant(self, relevant):
+        self.leaf_formulas = [
+            [i for i in formulas if i in relevant]
+            for formulas in self.leaf_formulas
+        ]
+
+    def _remove_redunant(self):
+        flag = True
+        while flag:
+            for parent, (left, right) in enumerate(zip(self.dt.tree_.children_left, self.dt.tree_.children_right)):
+                if self.dt.tree_.children_left[parent] == -1 and self.dt.tree_.children_right[parent] == -1 and \
+                    self.leaf_formulas[left] == self.leaf_formulas[right]:
+                    self._merge_leaves(parent, left, right)
+                    flag = True
+                    break
+
+    def _merge_leaves(self, parent, left, right):
+        self.dt.tree_.children_left[parent] = -1
+        self.dt.tree_.children_right[parent] = -1
+        self.leave_indices[parent] = self.leave_indices[left]
+        self.leave_indices[left] = -1
+        self.leave_indices[right] = -1
+        self.feature[parent] = -2
+        self.threshold[parent] = -2
 
 
 class ExplainerPoolingLayer:
@@ -138,7 +174,6 @@ class ExplainerPoolingLayer:
         self.dt = None
         self.n_features_in = None
         self.leaf_indices = None
-        self.combinations = None
         self.leaf_values = None
         self.aggregation = False
     
@@ -180,7 +215,7 @@ def _leaves(tree, node_id=0):
         return left + right
 
 
-def get_values(batch, model):
+def _get_values(batch, model):
     values = []
     aggr = []
     hooks = []
