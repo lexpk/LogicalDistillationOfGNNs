@@ -3,63 +3,59 @@ from torch_geometric.loader import DataLoader
 from torch_geometric import datasets
 from torch_geometric.data import Batch
 from lightning import Trainer
-from lightning.pytorch import seed_everything
 from pytorch_lightning.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 import torch
 import wandb
 
-from optuna.integration.wandb import WeightsAndBiasesCallback
-from gnnexplain.model.gtree import Explainer, OptimizingExplainer
+from gnnexplain.model.gtree import Optimizer
 from gnnexplain.nn.gcn import GraphGCN
-
-# Running on different hardware or with different versions of libraries may result in different results
-torch_seed, lightning_seed, numpy_seed, optuna_seed = 0, 0, 0, 0
-
-torch.manual_seed(torch_seed)
-seed_everything(lightning_seed)
 
 
 torch.set_float32_matmul_precision('medium')
+dataset_names = ['MUTAG', 'AIDS', 'NCI1', 'NCI109', 'ENZYMES', 'PROTEINS', 'REDDIT-BINARY', 'IMDB-BINARY']
 
-dataset_names = ['MUTAG', 'AIDS']
-
+k_fold = 2
 for name in dataset_names:
-    dataset = datasets.TUDataset(root='data', name=name).shuffle()
-    n_train = len(dataset) * 4 // 5
-    train_data, val_data = dataset[:n_train], dataset[n_train:]
+    for iteration in range(k_fold):
+        dataset = datasets.TUDataset(root='data', name=name)
+        n_val = len(dataset) // k_fold
 
-    train_loader = DataLoader(train_data, batch_size=100, shuffle=True, num_workers=15)
-    val_loader = DataLoader(val_data, batch_size=100, shuffle=False, num_workers=15)
+        val_data = dataset[iteration * n_val : (iteration + 1) * n_val]
+        train_data = dataset[:iteration * n_val] + dataset[(iteration + 1) * n_val:]
 
-    model = GraphGCN(dataset)
-    logger = WandbLogger(project="gnnexplain", group=name)
+        val_loader = DataLoader(val_data, batch_size=100, shuffle=False, num_workers=15)
+        train_loader = DataLoader(train_data, batch_size=100, shuffle=True, num_workers=15)
 
-    trainer = Trainer(
-        max_steps=1e4,
-        log_every_n_steps=5,
-        logger=logger,
-        callbacks=[ModelCheckpoint(
-            dirpath="checkpoints",
-            filename=name+"-{epoch:02d}",
-        )],
-        devices=1,
-        deterministic=True
-    )
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-    
-    wandb_kwargs = {
-        'project': 'gnnexplain',
-        'group': name
-    }
-    wandbc = WeightsAndBiasesCallback(metric_name="gtree_val_acc", wandb_kwargs=wandb_kwargs, as_multirun=True)
-    optuna.logging.set_verbosity(optuna.logging.ERROR)
+        model = GraphGCN(dataset.num_features, dataset.num_classes)
+        logger = WandbLogger(project="gnnexplain", group=name)
 
-    train_batch = Batch.from_data_list(train_data)
-    expl = OptimizingExplainer().fit(train_batch, model)
-    val_batch = Batch.from_data_list(val_data)
-    acc = expl.accuracy(val_batch)
+        trainer = Trainer(
+            max_steps=5,
+            log_every_n_steps=1,
+            logger=logger,
+            callbacks=[ModelCheckpoint(
+                dirpath="checkpoints",
+                filename=name+f"split={iteration}"+"-{step:02d}-{val_acc:.2%}",
+            )],
+            devices=1
+        )
+        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+            
+        optuna.logging.set_verbosity(optuna.logging.ERROR)
+        train_batch = Batch.from_data_list(train_data)
+        expl = Optimizer(n_trials=5).optimize(train_batch, model, logger=logger)
+        val_batch = Batch.from_data_list(val_data)
+        val_acc = expl.accuracy(val_batch)
 
-    wandb.log({'gtree_val_acc': acc})
-    
-    wandb.finish()
+        expl.save_image('./figures/' + name + f"-{val_acc:.0%}")
+        logger.log_image('explanation', images=['./figures/' + name + f"-{val_acc:.0%}.png"])
+        
+        logger.experiment.finish()
+        
+        api = wandb.Api()
+        run = api.run(f"lexpk/gnnexplain/{logger.version}")
+        with torch.no_grad():
+            run.summary['gcn_val_acc'] = model(val_batch).argmax(-1).eq(val_batch.y).float().mean().item()
+        run.summary['gtree_val_acc'] = val_acc
+        run.summary.update()

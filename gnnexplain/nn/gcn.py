@@ -45,21 +45,23 @@ class NodeGCN(LightningModule):
 
 
 class GraphGCN(LightningModule):
-    def __init__(self, dataset, hidden=256, layers=4):
+    def __init__(self, num_features, num_classes, hidden=256, layers=4):
         super().__init__()
+        self.num_features = num_features
+        self.num_classes = num_classes
         self.hidden = hidden
         self.layers = layers
         
         self.act = ReLU()
-        self.conv1 = GCNConv(dataset.num_features, hidden)
+        self.conv1 = GCNConv(num_features, hidden)
         self.norms = torch.nn.ModuleList(
             [GraphNorm(hidden) for _ in range(layers)])
         self.conv_layers = torch.nn.ModuleList(
             [GCNConv(hidden, hidden) for _ in range(layers)])
-        self.lin = Linear(hidden, dataset.num_classes)
+        self.lin = Linear(hidden, num_classes)
         self.loss = torch.nn.NLLLoss()
         
-        self.save_hyperparameters()
+        self.save_hyperparameters('hidden', 'layers', 'num_features', 'num_classes')
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -71,7 +73,7 @@ class GraphGCN(LightningModule):
         return F.log_softmax(x, dim=1)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(lr=1e-4))
+        return torch.optim.Adam(self.parameters(), lr=1e-5)
 
     def training_step(self, batch, batch_idx):
         out = self(batch)

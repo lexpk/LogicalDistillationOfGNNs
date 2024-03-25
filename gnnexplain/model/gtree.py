@@ -10,24 +10,33 @@ from torch_geometric.nn.aggr import Aggregation
 from torch_geometric.nn import global_mean_pool, global_add_pool
 from torch_geometric.data import Batch
 import optuna
+import wandb
 
 
 class Optimizer:
-    def __init__(self, max_depth=10, max_ccp_alpha=2e-2, lmb=1e-4, n_trials=100):
+    def __init__(self, max_depth=10, max_ccp_alpha=5e-3, lmb=1e-3, n_trials=100):
         self.max_depth = max_depth
         self.max_ccp_alpha = max_ccp_alpha
         self.lmb = lmb
         self.n_trials = n_trials
         self.explainer = None
     
-    def optimize(self, batch, model):
+    def optimize(self, batch, model, logger=None):
         datalist = batch.to_data_list()
         half = len(datalist) // 2
         train = Batch.from_data_list(datalist[:half])
         val = Batch.from_data_list(datalist[half:])
         values, aggr = _get_values(train, model)
 
-        def objective(trial):
+        if logger is not None:
+            logger.experiment.define_metric('gtree_step')
+            logger.experiment.define_metric('gtree_train_acc', step_metric='gtree_step')
+            logger.experiment.define_metric('gtree_opt_acc', step_metric='gtree_step')
+            logger.experiment.define_metric('gtree_node_count', step_metric='gtree_step')
+            logger.experiment.define_metric('gtree_regularized_acc', step_metric='gtree_step')
+            
+
+        def objective(trial, logger):
             params = {
                 f'max_depth_{i}' : trial.suggest_int(f'max_depth_{i}', 1, self.max_depth)
                 for i in range(len(values) + 1)
@@ -36,11 +45,22 @@ class Optimizer:
                 for i in range(len(values) + 1)
             }
             expl = Explainer(aggr, **params).fit(train, values).prune()
-            return expl.accuracy(val) - self.lmb * (sum(
-                layer.dt.tree_.node_count for layer in expl.layer) + expl.out_layer.dt.tree_.node_count)
+            train_acc = expl.accuracy(train)
+            opt_acc = expl.accuracy(val) 
+            node_count =sum(layer.dt.tree_.node_count for layer in expl.layer) + expl.out_layer.dt.tree_.node_count
+            regularized_acc = opt_acc - self.lmb * node_count
+            if logger is not None:
+                logger.experiment.log({
+                    'gtree_step': trial.number,
+                    'gtree_train_acc': train_acc,
+                    'gtree_opt_acc': opt_acc,
+                    'gtree_node_count': node_count,
+                    'gtree_regularized_acc': regularized_acc,
+                }, commit=True)
+            return regularized_acc
 
         study = optuna.create_study(direction='maximize')
-        study.optimize(objective, n_trials=self.n_trials, show_progress_bar=True)
+        study.optimize(lambda trial: objective(trial, logger), n_trials=self.n_trials, show_progress_bar=True)
 
         values, aggr = _get_values(batch, model)
         self.explainer = Explainer(aggr, **study.best_params).fit(batch, values).prune()
@@ -74,8 +94,8 @@ class Explainer:
         return self
 
     def predict(self, batch):
-        adj = to_scipy_sparse_matrix(batch.edge_index)
         x = batch.x.numpy()
+        adj = to_scipy_sparse_matrix(batch.edge_index, num_nodes=x.shape[0])
         for layer, aggr in zip(self.layer, self.aggr):
             x = layer.predict(x, adj if aggr else None)
         return self.out_layer.predict(x, batch.batch)

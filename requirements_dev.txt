@@ -4,3 +4,5 @@ torch
 torch_geometric
 lightning
 matplotlib
+wandb
+pandas
