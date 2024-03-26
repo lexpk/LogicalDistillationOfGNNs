@@ -5,45 +5,6 @@ from torch_geometric.nn import GCNConv, global_mean_pool, GraphNorm
 from lightning import LightningModule
 
 
-class NodeGCN(LightningModule):
-    def __init__(self, dataset, hidden=16, layers=2):
-        super().__init__()
-        self.conv1 = GCNConv(dataset.num_features, hidden)
-        self.act = ReLU()
-        self.conv2 = GCNConv(hidden, dataset.num_classes)
-        self.loss = torch.nn.NLLLoss()
-        
-        self.save_hyperparameters()
-
-    def forward(self, data):
-        x, edge_index = data.x, data.edge_index
-        x = self.conv1(x, edge_index)
-        x = self.act(x)
-        x = self.conv2(x, edge_index)
-        return F.log_softmax(x, dim=1)
-
-    def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-4)
-
-    def training_step(self, batch, batch_idx):
-        out = self(batch)[batch.train_mask]
-        y_train = batch.y[batch.train_mask]
-        loss = self.loss(out, y_train)
-        acc = (out.argmax(dim=1) == y_train).float().mean().item()
-        self.log('train_loss', loss, on_step=True, logger=True, sync_dist=True)
-        self.log('train_acc', acc, on_step=True, logger=True, sync_dist=True)
-        return loss
-
-    def validation_step(self, batch, batch_idx):
-        out = self(batch)[batch.val_mask]
-        y_val = batch.y[batch.val_mask]
-        loss = self.loss(out, y_val)
-        acc = (out.argmax(dim=1) == y_val).float().mean().item()
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True, logger=True)
-        self.log('val_acc', acc, on_epoch=True, prog_bar=True, logger=True)
-        return loss
-
-
 class GraphGCN(LightningModule):
     def __init__(self, num_features, num_classes, hidden=256, layers=4):
         super().__init__()
