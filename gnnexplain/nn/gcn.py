@@ -73,7 +73,7 @@ class GraphGCN(LightningModule):
         return F.log_softmax(x, dim=1)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=1e-5)
+        return torch.optim.Adam(self.parameters(), lr=1e-4)
 
     def training_step(self, batch, batch_idx):
         out = self(batch)

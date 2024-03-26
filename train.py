@@ -13,11 +13,17 @@ from gnnexplain.nn.gcn import GraphGCN
 
 
 torch.set_float32_matmul_precision('medium')
-dataset_names = ['MUTAG', 'AIDS', 'NCI1', 'NCI109', 'ENZYMES', 'PROTEINS', 'REDDIT-BINARY', 'IMDB-BINARY']
+dataset_names = [
+    'AIDS', 'BZR', 'BZR_MD',
+    'NCI1', 'NCI109', 'Mutagenicity', 'MUTAG',
+    'ENZYMES', 'PROTEINS',
+]
 
-k_fold = 2
+k_fold = 5
 for name in dataset_names:
     for iteration in range(k_fold):
+        if name == 'BZR' and iteration != 4:
+            continue
         dataset = datasets.TUDataset(root='data', name=name)
         n_val = len(dataset) // k_fold
 
@@ -28,10 +34,10 @@ for name in dataset_names:
         train_loader = DataLoader(train_data, batch_size=100, shuffle=True, num_workers=15)
 
         model = GraphGCN(dataset.num_features, dataset.num_classes)
-        logger = WandbLogger(project="gnnexplain", group=name)
+        logger = WandbLogger(project="gnnexplain", group=name+f'_{k_fold}fold_0')
 
         trainer = Trainer(
-            max_steps=5,
+            max_steps=3000,
             log_every_n_steps=1,
             logger=logger,
             callbacks=[ModelCheckpoint(
@@ -44,7 +50,7 @@ for name in dataset_names:
             
         optuna.logging.set_verbosity(optuna.logging.ERROR)
         train_batch = Batch.from_data_list(train_data)
-        expl = Optimizer(n_trials=5).optimize(train_batch, model, logger=logger)
+        expl = Optimizer(n_trials=1000).optimize(train_batch, model, logger=logger)
         val_batch = Batch.from_data_list(val_data)
         val_acc = expl.accuracy(val_batch)
 

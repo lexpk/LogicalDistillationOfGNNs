@@ -135,6 +135,8 @@ class ExplainerLayer:
 
     def fit(self, x, y, adj=None):
         self.n_features_in = x.shape[1]
+        if self.n_features_in == 0:
+            x = np.ones((x.shape[0], 1))   
         if adj is not None:
             self.aggregation = True
             x = np.asarray(np.concatenate([
@@ -165,6 +167,8 @@ class ExplainerLayer:
         return self
 
     def predict(self, x, adj=None):
+        if self.n_features_in == 0:
+            x = np.ones((x.shape[0], 1))
         if self.aggregation:
             x = np.asarray(np.concatenate([
                 x, adj @ x, adj @ (1 - x), (adj @ x) / (adj.sum(axis=1)).clip(1e-6, None)
@@ -219,16 +223,16 @@ class ExplainerLayer:
                     feature = int(feature)
                     threshold = float(threshold)
                     if feature < self.n_features_in:
-                        obj.set_text(fr'$\phi_{{{feature}}}^{{{n}}}x$')
+                        obj.set_text(fr'$\phi_{{{feature}}}^{{{n}}}v$')
                     elif feature < 2 * self.n_features_in:
-                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y(Exy\wedge\phi_{{{feature - self.n_features_in}}}^{{{n}}}y)$')
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}_vw\phi_{{{feature - self.n_features_in}}}^{{{n}}}w$')
                     elif feature < 3 * self.n_features_in:
-                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y(Exy\wedge\neg\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}y)$')
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}_vw\neg\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}w$')
                     else:
-                        obj.set_text(fr'$\exists^{{>{threshold}}}y(Exy\wedge\phi_{{{feature - 3 * self.n_features_in}}}^{{{n}}}y)$')
+                        obj.set_text(fr'$\exists^{{>{threshold}}}_{{\%}}v\wedge\phi_{{{feature - 3 * self.n_features_in}}}^{{{n}}}w$')
                 else:
                     txt = r"$" + r", ".join([
-                        fr"\phi_{{{i}}}^{{{n}}}x" for i in self.leaf_formulas[[i for i in self.leaf_indices if i != -1][leaf_counter]]
+                        fr"\phi_{{{i}}}^{{{n+1}}}x" for i in self.leaf_formulas[[i for i in self.leaf_indices if i != -1][leaf_counter]]
                     ]) + r"\:$"
                     obj.set_text(txt)
                     leaf_counter += 1
@@ -275,11 +279,11 @@ class ExplainerPoolingLayer:
                     feature = int(feature)
                     threshold = float(threshold)
                     if feature < self.n_features_in:
-                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}y\phi_{{{feature}}}^{{{n}}}y$')
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}\phi_{{{feature}}}^{{{n}}}v$')
                     elif feature < 2 * self.n_features_in:
-                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}\neg\phi_{{{feature - self.n_features_in}}}^{{{n}}}y$')
+                        obj.set_text(fr'$\exists^{{>{int(threshold)}}}\neg\phi_{{{feature - self.n_features_in}}}^{{{n}}}v$')
                     else:
-                        obj.set_text(fr'$\exists^{{>{threshold}}}y\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}y$')
+                        obj.set_text(fr'$\exists^{{>{threshold}}}_{{\%}}\phi_{{{feature - 2 * self.n_features_in}}}^{{{n}}}v$')
 
 
 def _pool(x, batch):
