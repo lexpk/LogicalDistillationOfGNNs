@@ -6,7 +6,7 @@ from lightning import LightningModule
 
 
 class GraphGCN(LightningModule):
-    def __init__(self, num_features, num_classes, hidden=256, layers=4):
+    def __init__(self, num_features, num_classes, hidden=256, layers=4, weight=None):
         super().__init__()
         self.num_features = num_features
         self.num_classes = num_classes
@@ -20,7 +20,7 @@ class GraphGCN(LightningModule):
         self.conv_layers = torch.nn.ModuleList(
             [GCNConv(hidden, hidden) for _ in range(layers)])
         self.lin = Linear(hidden, num_classes)
-        self.loss = torch.nn.NLLLoss()
+        self.loss = torch.nn.NLLLoss(weight=weight)
         
         self.save_hyperparameters('hidden', 'layers', 'num_features', 'num_classes')
 
@@ -51,12 +51,4 @@ class GraphGCN(LightningModule):
         acc = (out.argmax(dim=1) == batch.y).float().mean().item()
         self.log('val_loss', loss, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
         self.log('val_acc', acc, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        return loss
-
-    def test_step(self, batch, batch_idx):
-        out = self(batch)
-        loss = self.loss(out, batch.y)
-        acc = (out.argmax(dim=1) == batch.y).float().mean().item()
-        self.log('test_loss', loss, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('test_acc', acc, sync_dist=True, batch_size=batch.num_graphs)
         return loss
