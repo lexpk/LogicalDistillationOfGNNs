@@ -1,1 +1,1 @@
-Explaining GNNs through regularization.
+Explaining GNNs via iterated decision trees.
