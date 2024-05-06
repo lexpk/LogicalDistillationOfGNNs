@@ -73,33 +73,48 @@ class Optimizer:
     def fidelity(self, batch, model):
         return self.explainer.fidelity(batch, model)
 
-    def f1_score(self, batch):
-        return self.explainer.f1_score(batch)
+    def f1_score(self, batch, average='macro'):
+        return self.explainer.f1_score(batch, average=average)
 
 
 class Explainer:
-    def __init__(self, **params):
-        self.params = params
-        self.layer = []
+    def __init__(self, width=10, sample_size=20, layer_depth=3, max_depth=5, ccp_alpha=.0):
+        self.width = width
+        self.sample_size = sample_size
+        self.layer_depth = layer_depth
+        self.max_depth = max_depth
+        self.ccp_alpha = ccp_alpha
+        self.layer = None
         self.out_layer = None
 
-    def fit(self, batch, values):
+    def fit(self, batch, values, y, sample_weight=None):
+        self.layer = []
         adj = to_scipy_sparse_matrix(batch.edge_index, num_nodes=batch.x.shape[0]).tobsr()
-        x, y = batch.x.numpy(), batch.y.numpy()
+        x = batch.x.numpy()
+        node_sample_weight = sample_weight[batch.batch] if sample_weight is not None else None
         depth_indices = [x.shape[1]]
         for i, value in enumerate(values):
-            for _ in range(10):
-                self.layer.append(ExplainerLayer(self.params[f'max_depth_{i}'], self.params[f'ccp_alpha_{i}'], depth_indices))
-                samples = np.random.choice(np.arange(len(batch)), size=min(10, x.shape[0]), replace=False)
+            new_layers = []
+            depth_indices_new = []
+            for _ in range(self.width):
+                new_layers.append(ExplainerLayer(self.layer_depth, depth_indices))
+                samples = np.random.choice(np.arange(len(batch)), size=min(self.sample_size, x.shape[0]), replace=False)
                 small_batch = Batch.from_data_list(batch[samples])
                 small_batch_indices = torch.arange(len(batch.batch))[(batch.batch == torch.tensor(samples).view(-1, 1)).max(axis=0).values]
-                self.layer[-1].fit(x[small_batch_indices], value[small_batch_indices], to_scipy_sparse_matrix(small_batch.edge_index, num_nodes=small_batch_indices.shape[0]).tobsr())
-                x_new = self.layer[-1].predict(x, adj)
-                depth_indices.append(x_new.shape[1])
-                x = np.concatenate([x, x_new], axis=1)
+                new_layers[-1].fit(
+                    x[small_batch_indices],
+                    value[small_batch_indices],
+                    to_scipy_sparse_matrix(small_batch.edge_index, num_nodes=small_batch_indices.shape[0]).tobsr(),
+                    node_sample_weight[small_batch_indices] if node_sample_weight is not None else None
+                )
+                depth_indices_new.append(2 ** (self.layer_depth + 1) - 1)
+            x_new = np.concatenate([layer.predict(x, adj) for layer in new_layers], axis=1)
+            x = np.concatenate([x, x_new], axis=1)
+            self.layer += new_layers
+            depth_indices += depth_indices_new
         self.out_layer = ExplainerPoolingLayer(
-            self.params[f'max_depth_{len(values)}'],
-            self.params[f'ccp_alpha_{len(values)}'],
+            self.max_depth,
+            self.ccp_alpha,
             depth_indices
         )
         y = self.out_layer.fit(x, batch.batch, y)
@@ -108,8 +123,9 @@ class Explainer:
     def predict(self, batch):
         x = batch.x.numpy()
         adj = to_scipy_sparse_matrix(batch.edge_index, num_nodes=x.shape[0]).tobsr()
-        for layer in self.layer:
-            x = np.concatenate([x, layer.predict(x, adj)], axis=1)
+        for i in range(len(self.layer) // self.width):
+            x_new = np.concatenate([self.layer[j].predict(x, adj) for j in range(i * self.width, (i + 1) * self.width)], axis=1)
+            x = np.concatenate([x, x_new], axis=1)
         return self.out_layer.predict(x, batch.batch)
 
     def accuracy(self, batch):
@@ -148,15 +164,14 @@ class Explainer:
             model_pred = model(batch).argmax(dim=1).numpy()
         return (prediction == model_pred).mean()
 
-    def f1_score(self, batch):
+    def f1_score(self, batch, average='macro'):
         prediction = self.predict(batch)
-        return f1_score(batch.y.numpy(), prediction, average='macro')
+        return f1_score(batch.y.numpy(), prediction, average=average)
 
 
 class ExplainerLayer:
-    def __init__(self, max_depth, max_ccp_alpha, depth_indices):
+    def __init__(self, max_depth, depth_indices):
         self.max_depth = max_depth
-        self.max_ccp_alpha = max_ccp_alpha
         self.depth_indices = [index for index in depth_indices]
         self.n_features_in = sum(depth_indices)
         self.dt = None
@@ -164,15 +179,15 @@ class ExplainerLayer:
         self.leaf_values = None
         self.leaf_formulas = None
 
-    def fit(self, x, y, adj):
+    def fit(self, x, y, adj, sample_weight=None):
         if self.n_features_in == 0:
             x = np.ones((x.shape[0], 1))
         x_neigh = adj @ x
         x = np.asarray(np.concatenate([
             x, x_neigh, x + x_neigh, x_neigh / (adj.sum(axis=1)).clip(1e-6, None), (x + x_neigh) / (1 + adj.sum(axis=1))
         ], axis=1))
-        self.dt = DecisionTreeRegressor(max_depth=self.max_depth, ccp_alpha=self.max_ccp_alpha, splitter='best')
-        self.dt.fit(x, y)
+        self.dt = DecisionTreeRegressor(max_depth=self.max_depth, splitter='best')
+        self.dt.fit(x, y, sample_weight=sample_weight)
         leaves = _leaves(self.dt.tree_)
         leaf_values = [self.dt.tree_.value[i, :, 0] for i in leaves]
         if len(leaves) == 1:
@@ -280,10 +295,10 @@ class ExplainerPoolingLayer:
         self.leaf_indices = None
         self.leaf_values = None
     
-    def fit(self, x, batch, y):
+    def fit(self, x, batch, y, sample_weight=None):
         x = _pool(x, batch)
         self.dt = DecisionTreeClassifier(max_depth=self.max_depth, ccp_alpha=self.max_ccp_alpha)
-        self.dt.fit(x, y)
+        self.dt.fit(x, y, sample_weight=sample_weight)
 
     def predict(self, x, batch):
         x = _pool(x, batch)
@@ -368,7 +383,7 @@ def _get_values_model(batch, model):
     with torch.no_grad():
         model(batch).detach().numpy()
     hook.remove()
-    return values
+    return values[:-1]
 
 
 def _feature_formula(index, depth_indices):
@@ -377,6 +392,7 @@ def _feature_formula(index, depth_indices):
         return fr'U_{{{index}}}'
     else:
         return fr'\chi_{{{index}}}^{{{depth}}}'
+
 
 def _feature_depth_index(index, depth_indices):
     index = index % sum(depth_indices)
