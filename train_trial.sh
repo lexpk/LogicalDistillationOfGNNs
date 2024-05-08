@@ -1,1 +1,1 @@
-python -m evaluateEMCL --formula_index 0 --steps 100 --layers 3 --dim 64 --lr 5e-4 --dropout 0.0 --activation ReLU --aggregation add --batch_size 1000 --width 10 --layer_depth 2 --sample_size 100
+python -m evaluateTU --dataset NCI1 --kfold 10 --steps 100 --layers 8 --dim 128 --lr 1e-4 --activation ReLU --aggregation mean --batch_size 4000 --width 8 --layer_depth 2 --sample_size 500 --ccp_alpha 1e-3

@@ -15,7 +15,7 @@ from joblib import Parallel, delayed
 import random
 
 from gnnexplain.model.gtree import Explainer, _get_values
-from gnnexplain.nn.gnn import GCN
+from gnnexplain.nn.gnn import GNN
 from gnnexplain.BAMultiShapes.generate_dataset import generate
 
 from argparse import ArgumentParser
@@ -34,7 +34,7 @@ if __name__ == '__main__':
     parser.add_argument('--kfold', type=int, default=8, help='Number of folds for cross-validation')
     parser.add_argument('--layers', type=int, default=4, help='Number of layers')
     parser.add_argument('--dim', type=int, default=64, help='Dimension of node embeddings')
-    parser.add_argument('--dropout', type=float, default=0, help='Dropout rate')
+    parser.add_argument('--conv', type=str, default='GCN', help='Type of convolution layer', choices=['GCN', 'GIN'])
     parser.add_argument('--steps', type=int, default=1000, help='Number of training steps')
     parser.add_argument('--trials', type=int, default=1000, help='Number of Optuna trials')
     parser.add_argument('--max_depth', type=int, default=4, help='Maximum depth of the explanation tree')
@@ -48,7 +48,7 @@ if __name__ == '__main__':
     seed = 42
 
     def run(iteration, start_time, device=0):
-        torch.set_float32_matmul_precision('medium')
+        torch.set_float32_matmul_precision('high')
         torch.manual_seed(seed)
         random.seed(seed)
 
@@ -58,15 +58,17 @@ if __name__ == '__main__':
         ]
         random.shuffle(datalist)
         
-        train_data = datalist[iteration * 125 : (iteration + 1) * 125]
-        val_data = datalist[:iteration * 125] + datalist[(iteration + 1) * 125:]
+        n_val = len(datalist) // args.kfold
         
-        val_loader = DataLoader(val_data, batch_size=875, shuffle=False, num_workers=64//args.kfold, multiprocessing_context='fork')
-        train_loader = DataLoader(train_data, batch_size=125, shuffle=True, num_workers=64//args.kfold, multiprocessing_context='fork')
+        val_data = datalist[iteration * n_val : (iteration + 1) * n_val]
+        train_data = datalist[:iteration * n_val] + datalist[(iteration + 1) * n_val:]
+        
+        train_loader = DataLoader(train_data, batch_size=(args.kfold - 1) * n_val, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=n_val, shuffle=False)
 
-        model = GCN(1, 2, layers=args.layers, dim=args.dim, activation=args.activation, aggr=args.aggregation, lr=args.lr, dropout=args.dropout)
+        model = GNN(1, 2, layers=args.layers, dim=args.dim, activation=args.activation, aggr=args.aggregation, lr=args.lr, conv=args.conv)
         os.environ["WANDB_SILENT"] = "true"
-        logger = WandbLogger(project="gnnexplain", group=f'BAMultiShape_{args.activation}_{args.kfold}fold_{args.layers}layers_{args.dim}dim_{start_time}')
+        logger = WandbLogger(project="gnnexplain", group=f'BAMultiShape_{args.conv}_{args.activation}_{args.kfold}fold_{args.layers}layers_{args.dim}dim_{start_time}')
 
         trainer = Trainer(
             max_steps=args.steps,
@@ -83,31 +85,31 @@ if __name__ == '__main__':
         train_batch = Batch.from_data_list(train_data)
         val_batch = Batch.from_data_list(val_data)
 
-        idt0 = Explainer(width=25, sample_size=100, layer_depth=2, max_depth=10, ccp_alpha=1e-3).fit(
+        idt0 = Explainer(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
             train_batch, _get_values(train_batch, model), y=model(train_batch).argmax(-1))
-        idt0.prune()
         idt0_val_acc = idt0.accuracy(val_batch)
         idt0_f1_macro = idt0.f1_score(val_batch, average='macro')
         idt0_f1_micro = idt0.f1_score(val_batch, average='micro')
         idt0_fidelity = idt0.fidelity(val_batch, model)
+        idt0.prune()
         idt0.save_image('./figures/idt0_' + args.dataset + f'-{idt0_val_acc:.0%}.png')
         
-        idt1 = Explainer(width=10, sample_size=100, layer_depth=2, max_depth=10, ccp_alpha=1e-3).fit(
+        idt1 = Explainer(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
             train_batch, _get_values(train_batch, model), y=train_batch.y)
-        idt1.prune()
         idt1_val_acc = idt1.accuracy(val_batch)
         idt1_f1_macro = idt1.f1_score(val_batch, average='macro')
         idt1_f1_micro = idt1.f1_score(val_batch, average='micro')
         idt1_fidelity = idt1.fidelity(val_batch, model)
+        idt1.prune()
         idt1.save_image('./figures/idt1_' + args.dataset + f'-{idt1_val_acc:.0%}.png')            
 
-        idt2 = Explainer(width=10, sample_size=100, layer_depth=2, max_depth=10, ccp_alpha=1e-3).fit(
+        idt2 = Explainer(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
             train_batch, _get_values(train_batch, args.layers), y=train_batch.y)
-        idt2.prune()
         idt2_val_acc = idt2.accuracy(val_batch)
         idt2_f1_macro = idt2.f1_score(val_batch, average='macro')
         idt2_f1_micro = idt2.f1_score(val_batch, average='micro')
         idt2_fidelity = idt2.fidelity(val_batch, model)
+        idt2.prune()
         idt2.save_image('./figures/idt2_' + args.dataset + f'-{idt2_val_acc:.0%}.png')
         
         logger.experiment.finish()

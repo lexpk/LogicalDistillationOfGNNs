@@ -9,12 +9,13 @@ from torch_geometric import datasets
 from torch_geometric.data import Batch
 from lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
+from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 import torch
 import wandb
 from joblib import Parallel, delayed
 
 from gnnexplain.model.gtree import Explainer, _get_values
-from gnnexplain.nn.gnn import GCN
+from gnnexplain.nn.gnn import GNN
 
 from argparse import ArgumentParser
 
@@ -27,7 +28,6 @@ if __name__ == '__main__':
     parser.add_argument('--kfold', type=int, default=8, help='Number of folds for cross-validation')
     parser.add_argument('--layers', type=int, default=3, help='Number of layers')
     parser.add_argument('--dim', type=int, default=64, help='Dimension of node embeddings')
-    parser.add_argument('--dropout', type=float, default=0.5, help='Dropout rate')
     parser.add_argument('--steps', type=int, default=2000, help='Number of training steps')
     parser.add_argument('--batch_size', type=int, default=1024, help='Batch size')
     parser.add_argument('--width', type=int, default=10, help='Number of decision trees per layer')
@@ -44,33 +44,28 @@ if __name__ == '__main__':
     seed = 42
 
     def run(iteration, start_time, device=0):
-        torch.set_float32_matmul_precision('medium')
+        torch.set_float32_matmul_precision('high')
         torch.manual_seed(seed)
         
         dataset = datasets.TUDataset(root='data', name=args.dataset)
         n_val = len(dataset) // args.kfold
+        permutation = torch.randperm(len(dataset))
 
-        val_data = dataset[iteration * n_val : (iteration + 1) * n_val]
-        train_data = dataset[:iteration * n_val] + dataset[(iteration + 1) * n_val:]
+        val_data = dataset[permutation[iteration * n_val : (iteration + 1) * n_val]]
+        train_data = dataset[torch.concat([permutation[:iteration * n_val], permutation[(iteration + 1) * n_val:]])]
 
         val_loader = DataLoader(val_data, batch_size=min(len(val_data), args.batch_size), shuffle=False)
         train_loader = DataLoader(train_data, batch_size=min(len(train_data), args.batch_size), shuffle=True)
         
-        if iteration == 0:
-            num_classes = train_data.datasets[1].y.max() + 1
-            weight = len(train_data.datasets[1]) / (num_classes * torch.bincount(train_data.datasets[1].y, minlength=num_classes).float())
-        elif iteration == args.kfold - 1:
-            num_classes = train_data.datasets[0].y.max() + 1
-            weight = len(train_data.datasets[0]) / (num_classes * torch.bincount(train_data.datasets[0].y, minlength=num_classes).float())
-        else:
-            num_classes = max(train_data.datasets[0].y.max(), train_data.datasets[1].y.max()) + 1
-            bincount = torch.bincount(train_data.datasets[0].y, minlength=num_classes) + torch.bincount(train_data.datasets[1].y, minlength=num_classes)
-            weight = (len(train_data.datasets[0])  + len(train_data.datasets[1])) / (num_classes * bincount.float())
+        num_classes = train_data.y.max().item() + 1
+        bincount = torch.bincount(train_data.y, minlength=num_classes)
+        weight = len(train_data) / (num_classes * bincount.float())
         
-        model = GCN(dataset.num_features, dataset.num_classes, layers=args.layers, dim=args.dim, activation=args.activation, aggr=args.aggregation, lr=args.lr, dropout=args.dropout, weight=weight)
         os.environ["WANDB_SILENT"] = "true"
         logger = WandbLogger(project="gnnexplain", group=f'{args.dataset}_{args.activation}_{args.kfold}fold_{args.layers}layers_{args.dim}dim_{start_time}')
 
+        GCN = GNN(dataset.num_features, dataset.num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GCN", aggr=args.aggregation, lr=args.lr, weight=weight)
+        early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=10, verbose=False, mode="min")
         trainer = Trainer(
             max_steps=args.steps,
             logger=logger,
@@ -79,63 +74,54 @@ if __name__ == '__main__':
             enable_progress_bar=False,
             log_every_n_steps=1
         )
-        trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.fit(GCN, train_dataloaders=train_loader, val_dataloaders=val_loader)
         trainer.save_checkpoint(f'./checkpoints/{args.dataset}_{args.activation}_{logger.version}.ckpt')
-        model.eval()
+        GCN.eval()
+
+        GIN = GNN(dataset.num_features, dataset.num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GIN", aggr=args.aggregation, lr=args.lr, weight=weight)
+        early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=10, verbose=False, mode="min")
+        trainer = Trainer(
+            max_steps=args.steps,
+            callbacks=[early_stop_callback],
+            logger=logger,
+            devices=[device],
+            enable_checkpointing=False,
+            enable_progress_bar=False,
+            log_every_n_steps=1
+        )
+        trainer.fit(GIN, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.save_checkpoint(f'./checkpoints/{args.dataset}_{args.activation}_{logger.version}.ckpt')
+        GIN.eval()
+        
+        with torch.no_grad():
+            gcn_prediction = GCN(val_batch).argmax(-1)
+            gin_prediction = GIN(val_batch).argmax(-1)
 
         train_batch = Batch.from_data_list(train_data)
         val_batch = Batch.from_data_list(val_data)
         sample_weight = weight[train_batch.y]
 
-        idt0 = Explainer(width=25, sample_size=100, layer_depth=2, max_depth=10, ccp_alpha=1e-3).fit(
-            train_batch, _get_values(train_batch, model), y=model(train_batch).argmax(-1), sample_weight=sample_weight)
-        idt0.prune()
-        idt0_val_acc = idt0.accuracy(val_batch)
-        idt0_f1_macro = idt0.f1_score(val_batch, average='macro')
-        idt0_f1_micro = idt0.f1_score(val_batch, average='micro')
-        idt0_fidelity = idt0.fidelity(val_batch, model)
-        idt0.save_image('./figures/idt0_' + args.dataset + f'-{idt0_val_acc:.0%}.png')
         
-        idt1 = Explainer(width=10, sample_size=100, layer_depth=2, max_depth=10, ccp_alpha=1e-3).fit(
-            train_batch, _get_values(train_batch, model), y=train_batch.y, sample_weight=sample_weight)
-        idt1.prune()
-        idt1_val_acc = idt1.accuracy(val_batch)
-        idt1_f1_macro = idt1.f1_score(val_batch, average='macro')
-        idt1_f1_micro = idt1.f1_score(val_batch, average='micro')
-        idt1_fidelity = idt1.fidelity(val_batch, model)
-        idt1.save_image('./figures/idt1_' + args.dataset + f'-{idt1_val_acc:.0%}.png')            
+        def run_idt(values, y, sample_weight):
+            explainer = Explainer(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
+                train_batch, values, y=y, sample_weight=sample_weight)
+            explainer_prediction = explainer.predict(val_batch)
+            explainer.prune()
+            explainer.save_image(f'./figures/{args.dataset}_{args.activation}_{logger.version}')
+            return (
+                explainer_prediction.eq(val_batch.y).float().mean().item(),
+                f1_score(val_batch.y.cpu(), explainer_prediction.cpu(), average='macro'),
+                explainer_prediction.eq(gcn_prediction).float().mean().item(),
+                explainer_prediction.eq(gin_prediction).float().mean().item()
+            )
 
-        idt2 = Explainer(width=10, sample_size=100, layer_depth=2, max_depth=10, ccp_alpha=1e-3).fit(
-            train_batch, _get_values(train_batch, args.layers), y=train_batch.y, sample_weight=sample_weight)
-        idt2.prune()
-        idt2_val_acc = idt2.accuracy(val_batch)
-        idt2_f1_macro = idt2.f1_score(val_batch, average='macro')
-        idt2_f1_micro = idt2.f1_score(val_batch, average='micro')
-        idt2_fidelity = idt2.fidelity(val_batch, model)
-        idt2.save_image('./figures/idt2_' + args.dataset + f'-{idt2_val_acc:.0%}.png')
-        
+        idt_gcn_val_acc, idt_gcn_f1_macro, idt_gcn_gcn_fidelity, idt_gcn_gin_fidelity = run_idt(_get_values(train_batch, GCN), GCN(train_batch).argmax(-1), sample_weight)
+        idt_gcn_true_val_acc, idt_gcn_true_f1_macro, idt_gcn_true_gcn_fidelity, idt_gcn_true_gin_fidelity = run_idt(_get_values(train_batch, GCN), train_batch.y, sample_weight)
+        idt_gin_val_acc, idt_gin_f1_macro, idt_gin_gcn_fidelity, idt_gin_gin_fidelity = run_idt(_get_values(train_batch, GIN), GIN(train_batch).argmax(-1), sample_weight)
+        idt_gin_true_val_acc, idt_gin_true_f1_macro, idt_gin_true_gcn_fidelity, idt_gin_true_gin_fidelity = run_idt(_get_values(train_batch, GIN), train_batch.y, sample_weight)
+        idt_true_val_acc, idt_true_f1_macro, idt_true_gcn_fidelity, idt_true_gin_fidelity = run_idt(_get_values(train_batch, args.layers), train_batch.y, sample_weight)
         logger.experiment.finish()
         
-        api = wandb.Api()
-        current_run = api.run(f"lexpk/gnnexplain/{logger.version}")
-        with torch.no_grad():
-            model_predicition = model(val_batch).argmax(-1)
-            current_run.summary['gcn_val_acc'] = model_predicition.eq(val_batch.y).float().mean().item()
-            current_run.summary['gcn_f1_macro'] = f1_score(val_batch.y.cpu(), model_predicition.cpu(), average='macro')
-            current_run.summary['gcn_f1_micro'] = f1_score(val_batch.y.cpu(), model_predicition.cpu(), average='micro')
-        current_run.summary['idt0_val_acc'] = idt0_val_acc
-        current_run.summary['idt0_f1_macro'] = idt0_f1_macro
-        current_run.summary['idt0_f1_micro'] = idt0_f1_micro
-        current_run.summary['idt0_fidelity'] = idt0_fidelity
-        current_run.summary['idt1_val_acc'] = idt1_val_acc
-        current_run.summary['idt1_f1_macro'] = idt1_f1_macro
-        current_run.summary['idt1_f1_micro'] = idt1_f1_micro
-        current_run.summary['idt1_fidelity'] = idt1_fidelity
-        current_run.summary['idt2_val_acc'] = idt2_val_acc
-        current_run.summary['idt2_f1_macro'] = idt2_f1_macro
-        current_run.summary['idt2_f1_micro'] = idt2_f1_micro
-        current_run.summary['idt2_fidelity'] = idt2_fidelity
-        current_run.summary.update()
         
     def signal_handler(sig, frame):
         signal.signal(sig, signal.SIG_IGN)

@@ -3,17 +3,23 @@ from sklearn.metrics import f1_score
 import torch
 import torch.nn.functional as F
 from torch.nn import ReLU, Linear, Sequential, Tanh, Sigmoid
-from torch_geometric.nn import GATv2Conv, GCNConv, global_add_pool, global_mean_pool, GraphNorm
+from torch_geometric.nn import GINConv, GCNConv, global_add_pool, global_mean_pool, GraphNorm
 from lightning import LightningModule
 
 
-class GCN(LightningModule):
-    def __init__(self, num_features, num_classes, layers, dim, activation="Sigmoid", aggr="mean", lr=1e-4, dropout=0.0, weight=None):
+def gin_conv(in_channels, out_channels):
+    nn = Sequential(Linear(in_channels, 2 * in_channels), GraphNorm(2 * in_channels), ReLU(), Linear(2 * in_channels, out_channels))
+    return GINConv(nn)
+
+
+class GNN(LightningModule):
+    def __init__(self, num_features, num_classes, layers, dim, conv="GCN", activation="ReLU", aggr="mean", lr=1e-4, weight=None):
         super().__init__()
         self.num_features = num_features
         self.num_classes = num_classes
-        self.dim = dim
         self.layers = layers
+        self.dim = dim
+        self.conv = conv
         self.aggr = aggr
         self.lr = lr
 
@@ -24,7 +30,11 @@ class GCN(LightningModule):
             case "Sigmoid": self.act = Sigmoid()
             case _: raise ValueError(f"Unknown activation {activation}")
         
-        self.dropout = torch.nn.Dropout(dropout)
+        match conv:
+            case "GCN": self.conv = GCNConv
+            case "GIN": self.conv = gin_conv    
+        
+        
         self.conv = GCNConv
         self.norms = torch.nn.ModuleList(
             [GraphNorm(dim) for _ in range(layers)])
@@ -37,13 +47,13 @@ class GCN(LightningModule):
         )
         self.loss = torch.nn.NLLLoss(weight=weight)
         
-        self.save_hyperparameters('num_features', 'num_classes', 'layers', 'dim', 'activation', 'aggr', 'lr', 'dropout', 'weight')
+        self.save_hyperparameters('num_features', 'num_classes', 'layers', 'dim', 'activation', 'conv', 'aggr', 'lr', 'weight')
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
         x = self.embedding(x)
         for conv, norm in zip(self.conv_layers, self.norms):
-            x = x + self.dropout(norm(conv(x, edge_index)))
+            x = x + norm(conv(x, edge_index))
             x = self.act(x)
         match self.aggr:
             case "mean": x = global_mean_pool(x, batch)

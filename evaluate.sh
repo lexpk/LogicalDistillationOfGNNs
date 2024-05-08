@@ -1,2 +1,5 @@
-python -m evaluateTU --dataset AIDS --steps 1000 --layers 4 --dim 128 --lr 1e-4 --dropout 0.0 --activation ReLU --aggregation add --batch_size 2000 --width 10 --layer_depth 2 --sample_size 100
-python -m evaluateTU --dataset Mutagenicity --steps 500 --layers 3 --dim 512 --lr 1e-5 --dropout 0.0 --activation ReLU --aggregation mean --batch_size 4000 --width 100 --layer_depth 2 --sample_size 50
+python -m evaluateTU --dataset AIDS --conv GCN --steps 500 --layers 4 --dim 128 --lr 1e-4 --activation ReLU --aggregation add --batch_size 2000 --width 10 --layer_depth 2 --sample_size 100
+python -m evaluateTU --dataset PROTEINS --conv GCN --kfold 10 --steps 300 --layers 8 --dim 128 --lr 1e-5 --activation ReLU --aggregation mean --batch_size 4000 --width 16 --layer_depth 2 --sample_size 200 --ccp_alpha 1e-2
+python -m evaluateTU --dataset Mutagenicity --conv GCN --steps 500 --layers 3 --dim 512 --lr 1e-5 --activation ReLU --aggregation mean --batch_size 4000 --width 10 --layer_depth 3 --sample_size 500 --ccp_alpha 2e-3
+python -m evaluateEMCL --formula_index 0 --conv GCN --steps 100 --layers 3 --dim 512 --lr 1e-4 --activation ReLU --aggregation mean --width 10 --layer_depth 2 --sample_size 500 --ccp_alpha 2e-3
+python -m evaluateTU --dataset NCI1 --conv GIN --kfold 10 --steps 100 --layers 8 --dim 128 --lr 1e-4 --activation ReLU --aggregation mean --batch_size 4000 --width 8 --layer_depth 2 --sample_size 500 --ccp_alpha 1e-3

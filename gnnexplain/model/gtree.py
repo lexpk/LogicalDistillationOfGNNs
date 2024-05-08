@@ -143,19 +143,29 @@ class Explainer:
 
     def save_image(self, path):
         import matplotlib.pyplot as plt
-        fig, axs = plt.subplots(nrows=len(self.layer) + 1, figsize=(10, 4 * len(self.layer) + 4))
+        fig, axs = plt.subplots(
+            ncols=self.width, nrows=len(self.layer)//self.width + 1,
+            figsize=(4 * self.width, 4 * (len(self.layer)//self.width + 1))
+        )
         for i, layer in enumerate(self.layer):
-            layer.plot(axs[i], i)
-        self.out_layer.plot(axs[-1], len(self.layer))
+            layer.plot(axs[i // self.width, i % self.width], i)
+        self.out_layer.plot(axs[-1, 0], len(self.layer))
+        for i in range(1, self.width):
+            plt.delaxes(axs[-1, i])
         fig.savefig(path)
         plt.close(fig)
 
     def plot(self):
         import matplotlib.pyplot as plt
-        fig, axs = plt.subplots(nrows=len(self.layer) + 1, figsize=(10, 4 * len(self.layer) + 4))
+        fig, axs = plt.subplots(
+            ncols=self.width, nrows=len(self.layer)//self.width + 1,
+            figsize=(4 * self.width, 4 * (len(self.layer)//self.width + 1))
+        )
         for i, layer in enumerate(self.layer):
-            layer.plot(axs[i], i)
-        self.out_layer.plot(axs[-1], len(self.layer))
+            layer.plot(axs[i // self.width, i % self.width], i)
+        self.out_layer.plot(axs[-1, 0], len(self.layer))
+        for i in range(1, self.width):
+            plt.delaxes(axs[-1, i])
         plt.show()
 
     def fidelity(self, batch, model):
