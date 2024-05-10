@@ -22,6 +22,7 @@ class GNN(LightningModule):
         self.conv = conv
         self.aggr = aggr
         self.lr = lr
+        self.conv_name = conv
 
         self.embedding = Linear(num_features, dim)
         match activation:
@@ -70,11 +71,9 @@ class GNN(LightningModule):
         loss = self.loss(out, batch.y)
         acc = (out.argmax(dim=1) == batch.y).float().mean().item()
         f1_macro = f1_score(batch.y.cpu(), out.argmax(dim=1).cpu(), average='macro')
-        f1_micro = f1_score(batch.y.cpu(), out.argmax(dim=1).cpu(), average='micro')
-        self.log('train_loss', loss, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('train_acc', acc, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('train_f1_macro', f1_macro, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('train_f1_micro', f1_micro, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
+        self.log(f'{self.conv_name}_train_loss', loss, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
+        self.log(f'{self.conv_name}_train_acc', acc, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
+        self.log(f'{self.conv_name}_train_f1_macro', f1_macro, on_step=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -82,9 +81,7 @@ class GNN(LightningModule):
         loss = self.loss(out, batch.y)
         acc = (out.argmax(dim=1) == batch.y).float().mean().item()
         f1_macro = f1_score(batch.y.cpu(), out.argmax(dim=1).cpu(), average='macro')
-        f1_micro = f1_score(batch.y.cpu(), out.argmax(dim=1).cpu(), average='micro')
-        self.log('val_loss', loss, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('val_acc', acc, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('val_f1_macro', f1_macro, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
-        self.log('val_f1_micro', f1_micro, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
+        self.log(f'{self.conv_name}_val_loss', loss, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
+        self.log(f'{self.conv_name}_val_acc', acc, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
+        self.log(f'{self.conv_name}_val_f1_macro', f1_macro, on_epoch=True, logger=True, prog_bar=False, sync_dist=True, batch_size=batch.num_graphs)
         return loss

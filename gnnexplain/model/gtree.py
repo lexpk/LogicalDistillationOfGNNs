@@ -88,6 +88,8 @@ class Explainer:
         self.out_layer = None
 
     def fit(self, batch, values, y, sample_weight=None):
+        if self.sample_size is None or self.sample_size > len(batch):
+            self.sample_size = len(batch)
         self.layer = []
         adj = to_scipy_sparse_matrix(batch.edge_index, num_nodes=batch.x.shape[0]).tobsr()
         x = batch.x.numpy()
@@ -196,7 +198,7 @@ class ExplainerLayer:
         x = np.asarray(np.concatenate([
             x, x_neigh, x + x_neigh, x_neigh / (adj.sum(axis=1)).clip(1e-6, None), (x + x_neigh) / (1 + adj.sum(axis=1))
         ], axis=1))
-        self.dt = DecisionTreeRegressor(max_depth=self.max_depth, splitter='best')
+        self.dt = DecisionTreeRegressor(max_depth=self.max_depth, splitter='random')
         self.dt.fit(x, y, sample_weight=sample_weight)
         leaves = _leaves(self.dt.tree_)
         leaf_values = [self.dt.tree_.value[i, :, 0] for i in leaves]
