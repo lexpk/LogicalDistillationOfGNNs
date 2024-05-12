@@ -124,10 +124,11 @@ if __name__ == '__main__':
             explainer = Explainer(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
                 train_batch, values, y=y, sample_weight=sample_weight)
             explainer_prediction = explainer.predict(val_batch)
+            acc = (explainer_prediction == val_batch.y.detach().numpy()).mean()
             explainer.prune()
-            explainer.save_image(f'./figures/BAMulti_{args.activation}_{logger.version}')
+            explainer.save_image(f'./figures/BAMulti_{args.activation}_{logger.version}_{acc}.png')
             return (
-                (explainer_prediction == val_batch.y.detach().numpy()).mean(),
+                acc,
                 f1_score(val_batch.y.detach().numpy(), explainer_prediction, average='macro'),
                 (explainer_prediction == gcn_prediction).mean(),
                 (explainer_prediction == gin_prediction).mean()

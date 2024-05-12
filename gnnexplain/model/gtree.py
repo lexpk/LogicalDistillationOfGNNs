@@ -195,8 +195,9 @@ class ExplainerLayer:
         if self.n_features_in == 0:
             x = np.ones((x.shape[0], 1))
         x_neigh = adj @ x
+        deg = adj.sum(axis=1)
         x = np.asarray(np.concatenate([
-            x, x_neigh, x + x_neigh, x_neigh / (adj.sum(axis=1)).clip(1e-6, None), (x + x_neigh) / (1 + adj.sum(axis=1))
+            x, x_neigh, x_neigh / deg.clip(1e-6, None)
         ], axis=1))
         self.dt = DecisionTreeRegressor(max_depth=self.max_depth, splitter='random')
         self.dt.fit(x, y, sample_weight=sample_weight)
@@ -227,7 +228,7 @@ class ExplainerLayer:
             x = np.ones((x.shape[0], 1))
         x_neigh = adj @ x
         x = np.asarray(np.concatenate([
-            x, x_neigh, x + x_neigh, x_neigh / (adj.sum(axis=1)).clip(1e-6, None), (x + x_neigh) / (1 + adj.sum(axis=1))
+            x, x_neigh, x_neigh / (adj.sum(axis=1)).clip(1e-6, None)
         ], axis=1))
         pred = self.dt.apply(x)
         return self.leaf_values[self.leaf_indices[pred]]
@@ -284,11 +285,7 @@ class ExplainerLayer:
                     elif feature < 2 * self.n_features_in:
                         obj.set_text(fr'$A{formula} > {int(threshold)}$')
                     elif feature < 3 * self.n_features_in:
-                        obj.set_text(fr'$(I + A){formula} > {int(threshold)}$')
-                    elif feature < 4 * self.n_features_in:
                         obj.set_text(fr'$A{formula} > {threshold}$')
-                    else:
-                        obj.set_text(fr'$(I + A){formula} > {threshold}$')
                 else:
                     txt = r"$" + r", ".join([
                         fr"M_{{{i}}}^{{{n}}}" for i in self.leaf_formulas[[i for i in self.leaf_indices if i != -1][leaf_counter]]

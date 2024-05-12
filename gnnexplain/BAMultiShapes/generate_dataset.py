@@ -84,11 +84,11 @@ def generate(num_samples, seed=0):
         g = generate_class1(nb_random_edges=1, nb_node_ba=nb_node_ba, seed=seed)
         adjs.append(nx.adjacency_matrix(g).toarray())
         labels.append(0)
-        feats.append(list(np.ones((len(g.nodes()),10))/10))
+        feats.append(list(np.ones((len(g.nodes()),1))))
 
     for _ in range(int(num_samples/2)):
         g = generate_class0(nb_random_edges=1, nb_node_ba=nb_node_ba, seed=seed)
         adjs.append(nx.adjacency_matrix(g).toarray())
         labels.append(1)
-        feats.append(list(np.ones((len(g.nodes()), 10))/10))
+        feats.append(list(np.ones((len(g.nodes()), 1))))
     return adjs,feats,labels 
