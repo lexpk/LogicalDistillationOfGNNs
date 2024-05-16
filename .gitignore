@@ -67,3 +67,6 @@ ipython_config.py
 
 #pytorch lightning
 lightning_logs/
+
+#other
+experiments.ipynb

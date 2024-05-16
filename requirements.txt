@@ -1,7 +1,10 @@
-numpy
-torch
-torch_geometric
 lightning
 matplotlib
-wandb
+networkx
+numpy
 pandas
+scipy
+scikit-learn
+torch
+torch_geometric
+wandb
