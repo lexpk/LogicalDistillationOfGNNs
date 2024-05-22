@@ -10,7 +10,7 @@ from torch_geometric.nn import global_mean_pool, global_add_pool
 from torch_geometric.data import Batch
 
 
-class Explainer:
+class IDT:
     def __init__(self, width=10, sample_size=20, layer_depth=3, max_depth=5, ccp_alpha=.0):
         self.width = width
         self.sample_size = sample_size
@@ -32,7 +32,7 @@ class Explainer:
             new_layers = []
             depth_indices_new = []
             for _ in range(self.width):
-                new_layers.append(ExplainerLayer(self.layer_depth, depth_indices))
+                new_layers.append(IDTInnerLayer(self.layer_depth, depth_indices))
                 samples = np.random.choice(np.arange(len(batch)), size=min(self.sample_size, x.shape[0]), replace=False)
                 small_batch = Batch.from_data_list(batch[samples])
                 small_batch_indices = torch.arange(len(batch.batch))[(batch.batch == torch.tensor(samples).view(-1, 1)).max(axis=0).values]
@@ -47,7 +47,7 @@ class Explainer:
             x = np.concatenate([x, x_new], axis=1)
             self.layer += new_layers
             depth_indices += depth_indices_new
-        self.out_layer = ExplainerPoolingLayer(
+        self.out_layer = IDTFinalLayer(
             self.max_depth,
             self.ccp_alpha,
             depth_indices
@@ -114,7 +114,7 @@ class Explainer:
         return f1_score(batch.y.numpy(), prediction, average=average)
 
 
-class ExplainerLayer:
+class IDTInnerLayer:
     def __init__(self, max_depth, depth_indices):
         self.max_depth = max_depth
         self.depth_indices = [index for index in depth_indices]
@@ -227,7 +227,7 @@ class ExplainerLayer:
                     leaf_counter += 1
 
 
-class ExplainerPoolingLayer:
+class IDTFinalLayer:
     def __init__(self, max_depth, max_ccp_alpha, depth_indices):
         self.max_depth = max_depth
         self.max_ccp_alpha = max_ccp_alpha
@@ -271,6 +271,10 @@ class ExplainerPoolingLayer:
                         obj.set_text(fr'$1{formula} > {threshold}$')
                     else:
                         obj.set_text(fr'$1{formula} > {int(threshold)}$')
+                if 'True' in txt:
+                    obj.set_text(txt.replace('True', 'False'))
+                elif 'False' in txt:
+                    obj.set_text(txt.replace('False', 'True'))
 
 
 def _pool(x, batch):
@@ -278,7 +282,6 @@ def _pool(x, batch):
         global_mean_pool(torch.tensor(x), batch).numpy(),
         global_add_pool(torch.tensor(x), batch).numpy()
     ], axis=1)
-
 
 
 def _agglomerate_labels(n_labels, clustering):
@@ -298,7 +301,7 @@ def _leaves(tree, node_id=0):
         return left + right
 
 
-def _get_values(batch, model_or_int):
+def get_activations(batch, model_or_int):
     if isinstance(model_or_int, int):
         return _get_values_int(batch, model_or_int)
     if isinstance(model_or_int, torch.nn.Module):

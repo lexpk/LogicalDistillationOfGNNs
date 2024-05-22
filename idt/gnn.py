@@ -48,7 +48,7 @@ class GNN(LightningModule):
         )
         self.loss = torch.nn.NLLLoss(weight=weight)
         
-        self.save_hyperparameters('num_features', 'num_classes', 'layers', 'dim', 'activation', 'conv', 'aggr', 'lr', 'weight')
+        self.save_hyperparameters('num_features', 'num_classes', 'layers', 'dim', 'activation', 'aggr', 'lr', 'weight')
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch

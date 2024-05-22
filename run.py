@@ -10,9 +10,9 @@ import sys
 import time
 import torch
 
-from gnnexplain.data import data
-from gnnexplain.idt import Explainer, _get_values
-from gnnexplain.gnn import GNN
+from idt.data import data
+from idt.idt import IDT, get_activations
+from idt.gnn import GNN
 
 
 def run_cv(args, run_id):
@@ -33,7 +33,7 @@ def run_split(args, cv_split, run_id, device=0):
     GCN = GNN(num_features, num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GCN", aggr=args.aggregation, lr=args.lr, weight=weight)
     early_stop_callback = EarlyStopping(monitor="GCN_val_loss", patience=10, mode="min")
     trainer = Trainer(
-        max_steps=args.steps,
+        max_steps=args.max_steps,
         callbacks=[early_stop_callback],
         logger=logger,
         devices=[device],
@@ -48,7 +48,7 @@ def run_split(args, cv_split, run_id, device=0):
     GIN = GNN(num_features, num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GIN", aggr=args.aggregation, lr=args.lr, weight=weight)
     early_stop_callback = EarlyStopping(monitor="GIN_val_loss", patience=10, mode="min")
     trainer = Trainer(
-        max_steps=args.steps,
+        max_steps=args.max_steps,
         callbacks=[early_stop_callback],
         logger=logger,
         devices=[device],
@@ -76,7 +76,7 @@ def run_split(args, cv_split, run_id, device=0):
     sample_weight = weight[train_val_batch.y]
     
     def run_idt(values, y, sample_weight):
-        explainer = Explainer(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
+        explainer = IDT(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
             train_val_batch, values, y=y, sample_weight=sample_weight)
         explainer_prediction = explainer.predict(test_batch)
         test_accuracy = (explainer_prediction == test_batch.y.detach().numpy()).mean()
@@ -90,35 +90,35 @@ def run_split(args, cv_split, run_id, device=0):
         )
     
     idt_gcn_test_acc, idt_gcn_f1_macro, idt_gcn_gcn_fidelity, idt_gcn_gin_fidelity = \
-        run_idt(_get_values(train_val_batch, GCN), GCN(train_val_batch).argmax(-1), sample_weight)
+        run_idt(get_activations(train_val_batch, GCN), GCN(train_val_batch).argmax(-1), sample_weight)
     logger.experiment.summary['idt_gcn_test_acc'] = idt_gcn_test_acc
     logger.experiment.summary['idt_gcn_f1_macro'] = idt_gcn_f1_macro
     logger.experiment.summary['idt_gcn_gcn_fidelity'] = idt_gcn_gcn_fidelity
     logger.experiment.summary['idt_gcn_gin_fidelity'] = idt_gcn_gin_fidelity
     
     idt_gcn_true_test_acc, idt_gcn_true_f1_macro, idt_gcn_true_gcn_fidelity, idt_gcn_true_gin_fidelity = \
-        run_idt(_get_values(train_val_batch, GCN), train_val_batch.y.detach().numpy(), sample_weight)
+        run_idt(get_activations(train_val_batch, GCN), train_val_batch.y.detach().numpy(), sample_weight)
     logger.experiment.summary['idt_gcn_true_test_acc'] = idt_gcn_true_test_acc
     logger.experiment.summary['idt_gcn_true_f1_macro'] = idt_gcn_true_f1_macro
     logger.experiment.summary['idt_gcn_true_gcn_fidelity'] = idt_gcn_true_gcn_fidelity
     logger.experiment.summary['idt_gcn_true_gin_fidelity'] = idt_gcn_true_gin_fidelity
     
     idt_gin_test_acc, idt_gin_f1_macro, idt_gin_gcn_fidelity, idt_gin_gin_fidelity = \
-        run_idt(_get_values(train_val_batch, GIN), GIN(train_val_batch).argmax(-1), sample_weight)
+        run_idt(get_activations(train_val_batch, GIN), GIN(train_val_batch).argmax(-1), sample_weight)
     logger.experiment.summary['idt_gin_test_acc'] = idt_gin_test_acc
     logger.experiment.summary['idt_gin_f1_macro'] = idt_gin_f1_macro
     logger.experiment.summary['idt_gin_gcn_fidelity'] = idt_gin_gcn_fidelity
     logger.experiment.summary['idt_gin_gin_fidelity'] = idt_gin_gin_fidelity
     
     idt_gin_true_test_acc, idt_gin_true_f1_macro, idt_gin_true_gcn_fidelity, idt_gin_true_gin_fidelity = \
-        run_idt(_get_values(train_val_batch, GIN), train_val_batch.y, sample_weight)
+        run_idt(get_activations(train_val_batch, GIN), train_val_batch.y, sample_weight)
     logger.experiment.summary['idt_gin_true_test_acc'] = idt_gin_true_test_acc
     logger.experiment.summary['idt_gin_true_f1_macro'] = idt_gin_true_f1_macro
     logger.experiment.summary['idt_gin_true_gcn_fidelity'] = idt_gin_true_gcn_fidelity
     logger.experiment.summary['idt_gin_true_gin_fidelity'] = idt_gin_true_gin_fidelity
     
     idt_true_test_acc, idt_true_f1_macro, idt_true_gcn_fidelity, idt_true_gin_fidelity = \
-        run_idt(_get_values(train_val_batch, args.layers), train_val_batch.y.detach().numpy(), sample_weight)
+        run_idt(get_activations(train_val_batch, args.layers), train_val_batch.y.detach().numpy(), sample_weight)
     logger.experiment.summary['idt_true_test_acc'] = idt_true_test_acc
     logger.experiment.summary['idt_true_f1_macro'] = idt_true_f1_macro
     logger.experiment.summary['idt_true_gcn_fidelity'] = idt_true_gcn_fidelity
@@ -135,7 +135,7 @@ if __name__ == '__main__':
     parser.add_argument('--kfold', type=int, default=10, help='Number of folds for cross-validation')
     parser.add_argument('--layers', type=int, default=8, help='Number of layers')
     parser.add_argument('--dim', type=int, default=128, help='Dimension of node embeddings')
-    parser.add_argument('--steps', type=int, default=1000, help='Number of training steps')
+    parser.add_argument('--max_steps', type=int, default=1000, help='Upper bound for the number of training steps')
     parser.add_argument('--width', type=int, default=10, help='Number of decision trees per layer')
     parser.add_argument('--sample_size', type=int, default=None, help='Size of subsamples to train decision trees on')
     parser.add_argument('--layer_depth', type=int, default=2, help='Depth of iterated decision trees')

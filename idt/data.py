@@ -14,11 +14,11 @@ def data(name, kfold, cv_split, seed=0):
     rng = np.random.default_rng(seed)
     if name in ['EMLC0', 'EMLC1', 'EMLC2', 'BAMultiShapes']:
         if name == 'BAMultiShapes':
-            datalist = [_generate_BAMultiShapes(rng) for _ in range(1000)]
+            datalist = [_generate_BAMultiShapes(rng) for _ in range(8000)]
             num_features = 1
             num_classes = 2
         else:
-            datalist = [_generate_EMLC(name, rng) for _ in range(1000)]
+            datalist = [_generate_EMLC(name, rng) for _ in range(5000)]
             num_features = 2
             num_classes = 2
         
@@ -66,12 +66,12 @@ def _generate_EMLC(name, rng):
             has_more_than_half_u0 = (u0.sum() > 6)
             return Data(x=torch.tensor(u), edge_index=_adj_to_edge_index(adj), y=int(has_more_than_half_u0))
         case 'EMLC1':
-            has_lt_4_or_gt_10_neighbors = (edge_index[0].bincount() < 4) | (edge_index[0].bincount() > 10)
+            has_lt_4_or_gt_10_neighbors = (edge_index[0].bincount() < 5) | (edge_index[0].bincount() > 9)
             return Data(x=torch.tensor(u), edge_index=edge_index, y=has_lt_4_or_gt_10_neighbors.max().long())
         case 'EMLC2':
             degrees = adj.sum(1)
             has_gt_6_neighbors = degrees > 6
-            more_than_half_neighbours_with_gt_6_neighbors = (adj @ has_gt_6_neighbors / degrees.clip(1)) > 0.5
+            more_than_half_neighbours_with_gt_6_neighbors = ((adj @ has_gt_6_neighbors) / degrees.clip(1)) > 0.5
             return Data(x=torch.tensor(u), edge_index=edge_index, y=(torch.tensor(more_than_half_neighbours_with_gt_6_neighbors).float().mean() > 0.5).long())
 
 

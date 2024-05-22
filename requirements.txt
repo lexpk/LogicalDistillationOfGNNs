@@ -1,3 +1,4 @@
+ipykernel
 lightning
 matplotlib
 networkx
@@ -5,6 +6,7 @@ numpy
 pandas
 scipy
 scikit-learn
-torch
+torch==2.2.1
 torch_geometric
 wandb
+ipykernel
