@@ -76,12 +76,12 @@ def run_split(args, cv_split, run_id, device=0):
     sample_weight = weight[train_val_batch.y]
     
     def run_idt(values, y, sample_weight):
-        explainer = IDT(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
+        idt = IDT(width=args.width, sample_size=args.sample_size, layer_depth=args.layer_depth, max_depth=args.max_depth, ccp_alpha=args.ccp_alpha).fit(
             train_val_batch, values, y=y, sample_weight=sample_weight)
-        explainer_prediction = explainer.predict(test_batch)
+        explainer_prediction = idt.predict(test_batch)
         test_accuracy = (explainer_prediction == test_batch.y.detach().numpy()).mean()
-        explainer.prune()
-        explainer.save_image(f'./figures/{args.dataset}_{args.activation}_{logger.version}_{test_accuracy}.png')
+        idt.prune()
+        idt.save_image(f'./figures/{args.dataset}_{args.activation}_{logger.version}_{test_accuracy}.png')
         return (
             test_accuracy,
             f1_score(test_batch.y.detach().numpy(), explainer_prediction, average='macro'),

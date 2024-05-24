@@ -70,3 +70,5 @@ lightning_logs/
 
 #other
 experiments.ipynb
+train_trial.sh
+train_trial_.sh

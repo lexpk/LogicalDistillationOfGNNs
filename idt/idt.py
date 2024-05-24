@@ -228,9 +228,9 @@ class IDTInnerLayer:
 
 
 class IDTFinalLayer:
-    def __init__(self, max_depth, max_ccp_alpha, depth_indices):
+    def __init__(self, max_depth, ccp_alpha, depth_indices):
         self.max_depth = max_depth
-        self.max_ccp_alpha = max_ccp_alpha
+        self.ccp_alpha = ccp_alpha
         self.depth_indices = [index for index in depth_indices]
         self.n_features_in = sum(depth_indices)
         self.dt = None
@@ -239,7 +239,7 @@ class IDTFinalLayer:
     
     def fit(self, x, batch, y, sample_weight=None):
         x = _pool(x, batch)
-        self.dt = DecisionTreeClassifier(max_depth=self.max_depth, ccp_alpha=self.max_ccp_alpha)
+        self.dt = DecisionTreeClassifier(max_depth=self.max_depth, ccp_alpha=self.ccp_alpha)
         self.dt.fit(x, y, sample_weight=sample_weight)
 
     def predict(self, x, batch):
