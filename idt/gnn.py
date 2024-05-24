@@ -13,14 +13,14 @@ def gin_conv(in_channels, out_channels):
 
 
 class GNN(LightningModule):
-    def __init__(self, num_features, num_classes, layers, dim, conv="GCN", activation="ReLU", aggr="mean", lr=1e-4, weight=None):
+    def __init__(self, num_features, num_classes, layers, dim, conv="GCN", activation="ReLU", pool="mean", lr=1e-4, weight=None):
         super().__init__()
         self.num_features = num_features
         self.num_classes = num_classes
         self.layers = layers
         self.dim = dim
         self.conv = conv
-        self.aggr = aggr
+        self.pool = pool
         self.lr = lr
         self.conv_name = conv
 
@@ -48,7 +48,7 @@ class GNN(LightningModule):
         )
         self.loss = torch.nn.NLLLoss(weight=weight)
         
-        self.save_hyperparameters('num_features', 'num_classes', 'layers', 'dim', 'activation', 'aggr', 'lr', 'weight')
+        self.save_hyperparameters('num_features', 'num_classes', 'layers', 'dim', 'activation', 'pool', 'lr', 'weight')
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -56,10 +56,10 @@ class GNN(LightningModule):
         for conv, norm in zip(self.conv_layers, self.norms):
             x = x + norm(conv(x, edge_index))
             x = self.act(x)
-        match self.aggr:
+        match self.pool:
             case "mean": x = global_mean_pool(x, batch)
             case "add": x = global_add_pool(x, batch)
-            case _: raise ValueError(f"Unknown aggregation {self.aggr}")
+            case _: raise ValueError(f"Unknown aggregation {self.pool}")
         x = self.out(x)
         return F.log_softmax(x, dim=1)
 

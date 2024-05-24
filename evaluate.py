@@ -30,7 +30,7 @@ def run_split(args, cv_split, run_id, device=0):
     os.environ["WANDB_SILENT"] = "true"
     logger = WandbLogger(project="gnnexplain", group=f'{args.dataset}_{run_id}')
 
-    GCN = GNN(num_features, num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GCN", aggr=args.aggregation, lr=args.lr, weight=weight)
+    GCN = GNN(num_features, num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GCN", pool=args.pooling, lr=args.lr, weight=weight)
     early_stop_callback = EarlyStopping(monitor="GCN_val_loss", patience=10, mode="min")
     trainer = Trainer(
         max_steps=args.max_steps,
@@ -45,7 +45,7 @@ def run_split(args, cv_split, run_id, device=0):
     trainer.save_checkpoint(f'./checkpoints/{args.dataset}_GCN_{logger.version}.ckpt')
     GCN.eval()
 
-    GIN = GNN(num_features, num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GIN", aggr=args.aggregation, lr=args.lr, weight=weight)
+    GIN = GNN(num_features, num_classes, layers=args.layers, dim=args.dim, activation=args.activation, conv="GIN", pool=args.pooling, lr=args.lr, weight=weight)
     early_stop_callback = EarlyStopping(monitor="GIN_val_loss", patience=10, mode="min")
     trainer = Trainer(
         max_steps=args.max_steps,
@@ -130,7 +130,7 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--dataset', type=str, default='EMLC0', help='Name of the dataset')
     parser.add_argument('--activation', type=str, default='ReLU', help='Activation Function', choices=['ReLU', 'Tanh', 'Sigmoid'])
-    parser.add_argument('--aggregation', type=str, default='mean', help='Aggregation Function', choices=['mean', 'add'])
+    parser.add_argument('--pooling', type=str, default='mean', help='Pooling Function', choices=['mean', 'add'])
     parser.add_argument('--lr', type=float, default=1e-5, help='learning rate')
     parser.add_argument('--kfold', type=int, default=10, help='Number of folds for cross-validation')
     parser.add_argument('--layers', type=int, default=8, help='Number of layers')
